@@ -357,6 +357,10 @@ class DiffusionPipelineConfig:
                 pipeline.text_encoder.to(dtype)
             else:
                 pipeline = SanaPipeline.from_pretrained(path, torch_dtype=dtype)
+        elif name.startswith("qwen-image"):
+            # QwenImage models use DiffusionPipeline (not AutoPipelineForText2Image)
+            # since they may be edit pipelines (QwenImageEditPlusPipeline)
+            pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
         else:
             pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
         pipeline = pipeline.to(device)

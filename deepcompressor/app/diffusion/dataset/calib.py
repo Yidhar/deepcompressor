@@ -12,6 +12,11 @@ import torch.utils.data
 from diffusers.models.attention import JointTransformerBlock
 from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
+
+try:
+    from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+except ImportError:
+    QwenImageTransformerBlock = None
 from omniconfig import configclass
 
 from deepcompressor.data.cache import IOTensorsCache, ModuleForwardInput, TensorCache, TensorsCache
@@ -68,7 +73,44 @@ class DiffusionCalibDataset(DiffusionDataset):
         super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
         data = [torch.load(path) for path in self.filepaths]
         random.Random(seed).shuffle(data)
+        self._pad_encoder_hidden_states(data)
         self.data = data
+
+    @staticmethod
+    def _pad_encoder_hidden_states(data: list[dict[str, tp.Any]]) -> None:
+        """Pad encoder_hidden_states and mask to dataset-global uniform length.
+
+        Handles both PixArt-style (encoder_attention_mask) and QwenImage-style
+        (encoder_hidden_states_mask). For each mask key present in the data:
+        1. Find the global max sequence length across all samples
+        2. Pad encoder_hidden_states to that length (zero-fill)
+        3. Pad the mask itself to that length (False/0-fill)
+        This ensures tree_collate works correctly at any batch_size.
+        """
+        for mask_key in ("encoder_attention_mask", "encoder_hidden_states_mask"):
+            samples_with_mask = [
+                d for d in data
+                if mask_key in d.get("input_kwargs", {}) and d["input_kwargs"][mask_key] is not None
+            ]
+            if not samples_with_mask:
+                continue
+            # Find dataset-global max length from masks
+            target_len = max(d["input_kwargs"][mask_key].shape[-1] for d in samples_with_mask)
+            for d in samples_with_mask:
+                kwargs = d["input_kwargs"]
+                mask = kwargs[mask_key]
+                ehs = kwargs.get("encoder_hidden_states")
+                mask_len = mask.shape[-1]
+                # Pad encoder_hidden_states to target_len
+                if ehs is not None and ehs.shape[1] < target_len:
+                    kwargs["encoder_hidden_states"] = torch.nn.functional.pad(
+                        ehs, (0, 0, 0, target_len - ehs.shape[1])
+                    )
+                # Pad mask to target_len (False/0 for padding positions)
+                if mask_len < target_len:
+                    kwargs[mask_key] = torch.nn.functional.pad(
+                        mask, (0, target_len - mask_len)
+                    )
 
     def __len__(self) -> int:
         return len(self.data)
@@ -211,7 +253,10 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             assert len(args) == 0, f"Invalid args: {args}"
         else:
             hidden_states = args[0]
-        if isinstance(m, (FluxTransformerBlock, JointTransformerBlock)):
+        _dual_stream_blocks = (FluxTransformerBlock, JointTransformerBlock)
+        if QwenImageTransformerBlock is not None:
+            _dual_stream_blocks = _dual_stream_blocks + (QwenImageTransformerBlock,)
+        if isinstance(m, _dual_stream_blocks):
             if "encoder_hidden_states" in kwargs:
                 encoder_hidden_states = kwargs.pop("encoder_hidden_states")
             else:
@@ -241,7 +286,10 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             `dict[str | int, Any]`:
                 Dictionary for updating the next layer inputs.
         """
-        if isinstance(m, (FluxTransformerBlock, JointTransformerBlock)):
+        _dual_stream_blocks = (FluxTransformerBlock, JointTransformerBlock)
+        if QwenImageTransformerBlock is not None:
+            _dual_stream_blocks = _dual_stream_blocks + (QwenImageTransformerBlock,)
+        if isinstance(m, _dual_stream_blocks):
             assert isinstance(outputs, tuple) and len(outputs) == 2
             encoder_hidden_states, hidden_states = outputs
             return {0: hidden_states.detach().cpu(), 1: encoder_hidden_states.detach().cpu()}

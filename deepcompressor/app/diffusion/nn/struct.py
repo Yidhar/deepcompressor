@@ -36,6 +36,21 @@ from diffusers.models.transformers.transformer_flux import (
     FluxTransformerBlock,
 )
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
+
+try:
+    from diffusers.models.transformers.transformer_qwenimage import (
+        QwenImageTransformer2DModel,
+        QwenImageTransformerBlock,
+    )
+except ImportError:
+    QwenImageTransformer2DModel = None
+    QwenImageTransformerBlock = None
+
+try:
+    from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
+except ImportError:
+    QwenImageEditPlusPipeline = None
+
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
@@ -79,13 +94,16 @@ from .attention import DiffusionAttentionProcessor
 __all__ = ["DiffusionModelStruct", "DiffusionBlockStruct", "DiffusionModelStruct"]
 
 
-DIT_BLOCK_CLS = tp.Union[
+_dit_block_types = [
     BasicTransformerBlock,
     JointTransformerBlock,
     FluxSingleTransformerBlock,
     FluxTransformerBlock,
     SanaTransformerBlock,
 ]
+if QwenImageTransformerBlock is not None:
+    _dit_block_types.append(QwenImageTransformerBlock)
+DIT_BLOCK_CLS = tp.Union[tuple(_dit_block_types)]
 UNET_BLOCK_CLS = tp.Union[
     DownBlock2D,
     CrossAttnDownBlock2D,
@@ -94,17 +112,20 @@ UNET_BLOCK_CLS = tp.Union[
     UpBlock2D,
     CrossAttnUpBlock2D,
 ]
-DIT_CLS = tp.Union[
+_dit_cls_types = [
     Transformer2DModel,
     PixArtTransformer2DModel,
     SD3Transformer2DModel,
     FluxTransformer2DModel,
     SanaTransformer2DModel,
 ]
+if QwenImageTransformer2DModel is not None:
+    _dit_cls_types.append(QwenImageTransformer2DModel)
+DIT_CLS = tp.Union[tuple(_dit_cls_types)]
 UNET_CLS = tp.Union[UNet2DModel, UNet2DConditionModel]
 MODEL_CLS = tp.Union[DIT_CLS, UNET_CLS]
 UNET_PIPELINE_CLS = tp.Union[StableDiffusionPipeline, StableDiffusionXLPipeline]
-DIT_PIPELINE_CLS = tp.Union[
+_dit_pipeline_types = [
     StableDiffusion3Pipeline,
     PixArtAlphaPipeline,
     PixArtSigmaPipeline,
@@ -113,6 +134,9 @@ DIT_PIPELINE_CLS = tp.Union[
     FluxFillPipeline,
     SanaPipeline,
 ]
+if QwenImageEditPlusPipeline is not None:
+    _dit_pipeline_types.append(QwenImageEditPlusPipeline)
+DIT_PIPELINE_CLS = tp.Union[tuple(_dit_pipeline_types)]
 PIPELINE_CLS = tp.Union[UNET_PIPELINE_CLS, DIT_PIPELINE_CLS]
 
 
@@ -328,6 +352,12 @@ class DiffusionAttentionStruct(AttentionStruct):
                 attn_kwargs["attention_mask"] = kwargs.get("attention_mask", None)
             else:
                 attn_kwargs["attention_mask"] = kwargs.get("encoder_attention_mask", None)
+        elif QwenImageTransformerBlock is not None and isinstance(self.parent.module, QwenImageTransformerBlock):
+            # QwenImage passes attention_mask and image_rotary_emb via joint_attention_kwargs
+            joint_kwargs = kwargs.get("joint_attention_kwargs", {}) or {}
+            attn_kwargs = dict(joint_kwargs.items())
+            if "image_rotary_emb" not in attn_kwargs:
+                attn_kwargs["image_rotary_emb"] = kwargs.get("image_rotary_emb", None)
         else:
             attn_kwargs = {}
         return attn_kwargs
@@ -705,6 +735,16 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             ffn, ffn_rname = module.ff, "ff"
             pre_add_ffn_norm, pre_add_ffn_norm_rname = module.norm2_context, "norm2_context"
             add_ffn, add_ffn_rname = module.ff_context, "ff_context"
+        elif QwenImageTransformerBlock is not None and isinstance(module, QwenImageTransformerBlock):
+            parallel = False
+            norm_type = add_norm_type = "ada_norm_zero"
+            pre_attn_norms, pre_attn_norm_rnames = [module.img_norm1], ["img_norm1"]
+            attns, attn_rnames = [module.attn], ["attn"]
+            pre_attn_add_norms, pre_attn_add_norm_rnames = [module.txt_norm1], ["txt_norm1"]
+            pre_ffn_norm, pre_ffn_norm_rname = module.img_norm2, "img_norm2"
+            ffn, ffn_rname = module.img_mlp, "img_mlp"
+            pre_add_ffn_norm, pre_add_ffn_norm_rname = module.txt_norm2, "txt_norm2"
+            add_ffn, add_ffn_rname = module.txt_mlp, "txt_mlp"
         else:
             raise NotImplementedError(f"Unsupported module type: {type(module)}")
         return DiffusionTransformerBlockStruct(
@@ -1718,6 +1758,13 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 input_embed, input_embed_rname = module.pos_embed, "pos_embed"
                 time_embed, time_embed_rname = module.time_text_embed, "time_text_embed"
                 text_embed, text_embed_rname = module.context_embedder, "context_embedder"
+                norm_out, norm_out_rname = module.norm_out, "norm_out"
+                proj_out, proj_out_rname = module.proj_out, "proj_out"
+                transformer_blocks, transformer_blocks_rname = module.transformer_blocks, "transformer_blocks"
+            elif QwenImageTransformer2DModel is not None and isinstance(module, QwenImageTransformer2DModel):
+                input_embed, input_embed_rname = module.img_in, "img_in"
+                time_embed, time_embed_rname = module.time_text_embed, "time_text_embed"
+                text_embed, text_embed_rname = module.txt_in, "txt_in"
                 norm_out, norm_out_rname = module.norm_out, "norm_out"
                 proj_out, proj_out_rname = module.proj_out, "proj_out"
                 transformer_blocks, transformer_blocks_rname = module.transformer_blocks, "transformer_blocks"
