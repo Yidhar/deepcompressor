@@ -19,6 +19,7 @@ from ..quantizer.processor import Quantizer
 from ..utils import tools
 from ..utils.hooks import Hook
 from .config import SearchBasedCalibConfig, SearchBasedCalibGranularity, SearchBasedCalibObjective
+from .distributed import DistributedCalibContext
 
 __all__ = ["SearchBasedCalibrator"]
 
@@ -74,6 +75,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         x_quantizer: Quantizer | None,
         y_quantizer: Quantizer | None,
         develop_dtype: torch.dtype,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> None:
         """Initialize the search-based calibrator.
 
@@ -90,7 +92,11 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 The y quantizer for y-x computation.
             develop_dtype (`torch.dtype`):
                 The development data type.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
+                When provided and world_size > 1, sample evaluation is distributed across GPUs.
         """
+        self.dist_ctx = dist_ctx
         self.tensor_type = tensor_type
         self.config = config
         self.objective = self.config.objective
@@ -721,14 +727,20 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 },
             )
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
+            _num_orig_samples = len(orig_ipts.front().data)
+            _local_orig_indices = (
+                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+            )
             for j, (_, w) in enumerate(orig_wgts):
                 w = _reshape_w(w, view_shape=w_view_shapes[j])
                 for s, ipt in enumerate(orig_ipts):
-                    for i, x in enumerate(ipt.data):
+                    for i in _local_orig_indices:
+                        x = ipt.data[i]
                         x = x.to(device=w.device, non_blocking=True)
                         y = torch.matmul(x, w)
                         y = y.view(*y.shape[:-2], y.shape[-2] * y.shape[-1])
                         orig_opts[(i, s, j)] = y.to(device=self.opts_device or y.device, non_blocking=True)
+            del _num_orig_samples, _local_orig_indices
             if self.needs_to_pre_reshape_x_for_wgts:
                 if same_ipts:
                     ipts = orig_ipts
@@ -753,13 +765,18 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 orig_ipts = ipts
             assert isinstance(orig_ipts, TensorsCache), "orig_ipts should not be None for OutputsError"
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
-            for i in range(len(orig_ipts.front().data)):
+            _num_orig_samples = len(orig_ipts.front().data)
+            _local_orig_indices = (
+                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+            )
+            for i in _local_orig_indices:
                 ipt = orig_ipts.extract(i, eval_kwargs)
                 y = eval_module(*ipt.args, **ipt.kwargs)
                 y = y[0] if not isinstance(y, torch.Tensor) else y
                 assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
                 orig_opts[(i,)] = y.to(device=self.opts_device or y.device, non_blocking=True)
                 del ipt, y
+            del _num_orig_samples, _local_orig_indices
             for p, s in _state_dict:
                 p.data = s
             del orig_wgts, orig_ipts, _state_dict
@@ -769,6 +786,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         torch.cuda.empty_cache()
         self.logger.debug(f"+ finished calculating the original outputs, ram usage: {psutil.virtual_memory().percent}")
         # endregion
+        # Precompute local sample indices for distributed calibration
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
+            _dist_ctx.validate_sample_count(len(ipts.front().data))
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []
@@ -790,10 +811,15 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     e.append(e_w)
             elif self.objective == SearchBasedCalibObjective.ProductsError:
                 e = [None] * len(wgts)
+                _num_samples = len(ipts.front().data)
+                _local_indices = (
+                    _dist_ctx.shard_indices(_num_samples) if _dist_ctx is not None else range(_num_samples)
+                )
                 for j, w in enumerate(wgts):
                     w = _reshape_w(self._process_w_in_xw(w), view_shape=w_view_shapes[j])
                     for s, ipt in enumerate(ipts):
-                        for i, x in enumerate(ipt.data):
+                        for i in _local_indices:
+                            x = ipt.data[i]
                             x = x.to(device=w.device, non_blocking=True)
                             if not self.needs_to_pre_reshape_x_for_wgts:
                                 x = self._process_x_in_xw(x, channels_dim=ipt.channels_dim)
@@ -814,10 +840,16 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                                 e[j] = y
                             else:
                                 e[j].add_(y)
+                if _dist_ctx is not None:
+                    _dist_ctx.all_reduce_error_list(e)
             elif self.objective == SearchBasedCalibObjective.OutputsError:
                 self._process_wgts_centric_mod(wgts=wgts, mods=mods, **kwargs)
                 e = [None]
-                for i in range(len(ipts.front().data)):
+                _num_samples = len(ipts.front().data)
+                _local_indices = (
+                    _dist_ctx.shard_indices(_num_samples) if _dist_ctx is not None else range(_num_samples)
+                )
+                for i in _local_indices:
                     ipt = ipts.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
@@ -829,6 +861,8 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     else:
                         e[0].add_(y)
                     del ipt, y
+                if _dist_ctx is not None:
+                    _dist_ctx.all_reduce_error_list(e)
                 self._recover_mod()
             else:
                 raise ValueError(f"Unknown objective {self.objective}")
@@ -886,15 +920,21 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 for ipt in ipts
             ]
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
+            _num_orig_samples = len(orig_ipts.front().data)
+            _local_orig_indices = (
+                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+            )
             for j, (_, w) in enumerate(orig_wgts):
                 w = _reshape_w(w, view_shape=x_view_shapes[0])
                 for s, ipt in enumerate(orig_ipts):
-                    for i, x in enumerate(ipt.data):
+                    for i in _local_orig_indices:
+                        x = ipt.data[i]
                         x = x.to(device=w.device, non_blocking=True)
                         x = _reshape_x(x, view_shape=x_view_shapes[s], fn=ipt.reshape)
                         y = torch.matmul(x, w)
                         y = y.view(*y.shape[:-2], y.shape[-2] * y.shape[-1])
                         orig_opts[(i, s, j)] = y.to(device=self.opts_device or y.device, non_blocking=True)
+            del _num_orig_samples, _local_orig_indices
             if self.needs_to_pre_reshape_w_for_ipts:
                 for j, w in enumerate(wgts):
                     wgts[j] = _reshape_w(w, view_shape=x_view_shapes[0])
@@ -906,13 +946,18 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 for p, w in orig_wgts:
                     p.data = w.to(device=p.data.device)
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
-            for i in range(len(orig_ipts.front().data)):
+            _num_orig_samples = len(orig_ipts.front().data)
+            _local_orig_indices = (
+                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+            )
+            for i in _local_orig_indices:
                 ipt = orig_ipts.extract(i, eval_kwargs)
                 y = eval_module(*ipt.args, **ipt.kwargs)
                 y = y[0] if not isinstance(y, torch.Tensor) else y
                 assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
                 orig_opts[(i,)] = y.to(device=self.opts_device or y.device, non_blocking=True)
                 del ipt, y
+            del _num_orig_samples, _local_orig_indices
             for p, s in _state_dict:
                 p.data = s
             del orig_wgts, orig_ipts, _state_dict
@@ -921,6 +966,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         gc.collect()
         torch.cuda.empty_cache()
         # endregion
+        # Precompute local sample indices for distributed calibration
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
+            _dist_ctx.validate_sample_count(len(ipts.front().data))
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []
@@ -946,12 +995,17 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                             e[s].add_(e_x)
             elif self.objective == SearchBasedCalibObjective.ProductsError:
                 e = [None] * len(ipts)
+                _num_samples = len(ipts.front().data)
+                _local_indices = (
+                    _dist_ctx.shard_indices(_num_samples) if _dist_ctx is not None else range(_num_samples)
+                )
                 for j, w in enumerate(wgts):
                     if not self.needs_to_pre_reshape_w_for_ipts:
                         w = self._process_w_in_xw(w)
                         w = _reshape_w(w, view_shape=x_view_shapes[0])
                     for s, ipt in enumerate(ipts):
-                        for i, x in enumerate(ipt.data):
+                        for i in _local_indices:
+                            x = ipt.data[i]
                             x = x.to(device=w.device, non_blocking=True)
                             x = self._process_x_in_xw(x, channels_dim=ipt.channels_dim)
                             x = _reshape_x(x, view_shape=x_view_shapes[s], fn=ipt.reshape)
@@ -971,10 +1025,16 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                                 e[s] = y
                             else:
                                 e[s].add_(y)
+                if _dist_ctx is not None:
+                    _dist_ctx.all_reduce_error_list(e)
             elif self.objective == SearchBasedCalibObjective.OutputsError:
                 self._process_ipts_centric_mod(wgts=wgts, mods=mods, **kwargs)
                 e = [None]
-                for i in range(len(ipts.front().data)):
+                _num_samples = len(ipts.front().data)
+                _local_indices = (
+                    _dist_ctx.shard_indices(_num_samples) if _dist_ctx is not None else range(_num_samples)
+                )
+                for i in _local_indices:
                     ipt = ipts.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
@@ -986,6 +1046,8 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     else:
                         e[0].add_(y)
                     del ipt, y
+                if _dist_ctx is not None:
+                    _dist_ctx.all_reduce_error_list(e)
                 self._recover_mod()
             else:
                 raise ValueError(f"Unknown objective {self.objective}")
@@ -1028,13 +1090,18 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 for p, w in orig_y_wgts:
                     p.data = w.to(device=p.data.device)
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
-            for i in range(len(orig_eval_inputs.front().data)):
+            _num_orig_samples = len(orig_eval_inputs.front().data)
+            _local_orig_indices = (
+                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+            )
+            for i in _local_orig_indices:
                 ipt = orig_eval_inputs.extract(i, eval_kwargs)
                 y = eval_module(*ipt.args, **ipt.kwargs)
                 y = y[0] if not isinstance(y, torch.Tensor) else y
                 assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
                 orig_opts[(i,)] = y.to(device=self.opts_device or y.device, non_blocking=True)
                 del ipt, y
+            del _num_orig_samples, _local_orig_indices
             for p, s in _x_state_dict:
                 p.data = s
             for p, s in _y_state_dict:
@@ -1045,6 +1112,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         gc.collect()
         torch.cuda.empty_cache()
         # endregion
+        # Precompute local sample indices for distributed calibration
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None:
+            _dist_ctx.validate_sample_count(len(eval_inputs.front().data))
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []
@@ -1058,7 +1129,11 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     **kwargs,
                 )
                 e = [None]
-                for i in range(len(eval_inputs.front().data)):
+                _num_samples = len(eval_inputs.front().data)
+                _local_indices = (
+                    _dist_ctx.shard_indices(_num_samples) if _dist_ctx is not None else range(_num_samples)
+                )
+                for i in _local_indices:
                     ipt = eval_inputs.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
@@ -1070,6 +1145,8 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     else:
                         e[0].add_(y)
                     del ipt, y
+                if _dist_ctx is not None:
+                    _dist_ctx.all_reduce_error_list(e)
                 self._recover_mod()
             else:
                 raise ValueError(f"Unknown objective {self.objective}")

@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from deepcompressor.calib.distributed import DistributedCalibContext
 from deepcompressor.calib.smooth import ActivationSmoother, smooth_linear_modules
 from deepcompressor.data.cache import IOTensorsCache
 from deepcompressor.quantizer import Quantizer
@@ -49,6 +50,7 @@ def smooth_diffusion_qkv_proj(
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
     block_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
     # region qkv projection
@@ -78,6 +80,7 @@ def smooth_diffusion_qkv_proj(
             eval_module=attn,
             eval_kwargs=attn.filter_kwargs(block_kwargs),
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         if prevs is None:
             # we need to register forward pre hook to smooth inputs
@@ -121,6 +124,7 @@ def smooth_diffusion_qkv_proj(
             eval_module=wrap_joint_attn(attn, indexes=1) if attn.is_joint_attn() else attn,
             eval_kwargs=attn.filter_kwargs(block_kwargs),
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         if prevs is None:
             # we need to register forward pre hook to smooth inputs
@@ -138,6 +142,7 @@ def smooth_diffusion_out_proj(  # noqa: C901
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
     block_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
     module_keys = []
@@ -173,6 +178,7 @@ def smooth_diffusion_out_proj(  # noqa: C901
             eval_module=attn.o_proj,
             extra_modules=[attn.add_o_proj] if attn.is_joint_attn() else None,
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
     elif len(module_keys) == 1 and module_keys[0] == attn.add_out_proj_key:
         assert attn.is_joint_attn()
@@ -194,6 +200,7 @@ def smooth_diffusion_out_proj(  # noqa: C901
             eval_module=attn.add_o_proj,
             extra_modules=[attn.o_proj],
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
     else:
         assert attn.is_joint_attn()
@@ -215,6 +222,7 @@ def smooth_diffusion_out_proj(  # noqa: C901
             eval_module=wrap_joint_attn(attn, indexes=(0, 1)),
             eval_kwargs=attn.filter_kwargs(block_kwargs),
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
     if config.enabled_wgts and config.wgts.enabled_low_rank:
         config.wgts.low_rank.exclusive = exclusive
@@ -239,6 +247,7 @@ def smooth_diffusion_up_proj(
     config: DiffusionQuantConfig,
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     assert len(ffn.up_projs) == 1
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
@@ -268,6 +277,7 @@ def smooth_diffusion_up_proj(
             eval_inputs=block_cache[ffn.up_proj_name].inputs if block_cache else None,
             eval_module=ffn.up_proj,
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         if prevs is None:
             ActivationSmoother(smooth_cache[cache_key], channels_dim=channels_dim).as_hook().register(ffn.up_proj)
@@ -282,6 +292,7 @@ def smooth_diffusion_down_proj(
     config: DiffusionQuantConfig,
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
     # ffn down projection
@@ -307,6 +318,7 @@ def smooth_diffusion_down_proj(
             eval_inputs=block_cache[ffn.down_proj_name].inputs if block_cache else None,
             eval_module=ffn.down_proj,
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         ffn.down_proj.in_smooth_cache_key = cache_key
         ActivationSmoother(smooth_cache[cache_key], channels_dim=channels_dim).as_hook().register(ffn.down_proj)
@@ -320,6 +332,7 @@ def smooth_diffusion_parallel_qkv_up_proj(
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
     block_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     assert block.parallel
     assert len(block.ffn_struct.up_projs) == 1
@@ -349,6 +362,7 @@ def smooth_diffusion_parallel_qkv_up_proj(
             eval_kwargs=block_kwargs,
             splits=[len(attn.qkv_proj)],
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         ActivationSmoother(smooth_cache[cache_key], channels_dim=-1).as_hook().register(modules)
         for m in modules:
@@ -363,6 +377,7 @@ def smooth_diffusion_parallel_qkv_up_proj(
                 config=config,
                 smooth_cache=smooth_cache,
                 block_cache=block_cache,
+                dist_ctx=dist_ctx,
             )
         return smooth_cache
     module_key = attn.add_qkv_proj_key
@@ -392,6 +407,7 @@ def smooth_diffusion_parallel_qkv_up_proj(
             eval_module=block,
             eval_kwargs=block_kwargs,
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         ActivationSmoother(smooth_cache[cache_key], channels_dim=-1).as_hook().register(modules)
         for m in modules:
@@ -407,6 +423,7 @@ def smooth_diffusion_sequential_transformer_block(
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
     block_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     assert not block.parallel
     for attn in block.attn_structs:
@@ -414,10 +431,12 @@ def smooth_diffusion_sequential_transformer_block(
             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs
         )
         smooth_cache = smooth_diffusion_qkv_proj(
-            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs
+            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs,
+            dist_ctx=dist_ctx,
         )
         smooth_cache = smooth_diffusion_out_proj(
-            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs
+            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs,
+            dist_ctx=dist_ctx,
         )
     if block.ffn_struct is not None:
         smooth_cache = smooth_diffusion_up_proj(
@@ -426,9 +445,11 @@ def smooth_diffusion_sequential_transformer_block(
             config=config,
             smooth_cache=smooth_cache,
             block_cache=block_cache,
+            dist_ctx=dist_ctx,
         )
         smooth_cache = smooth_diffusion_down_proj(
-            ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache
+            ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache,
+            dist_ctx=dist_ctx,
         )
     if block.add_ffn_struct is not None:
         smooth_cache = smooth_diffusion_up_proj(
@@ -437,9 +458,11 @@ def smooth_diffusion_sequential_transformer_block(
             config=config,
             smooth_cache=smooth_cache,
             block_cache=block_cache,
+            dist_ctx=dist_ctx,
         )
         smooth_cache = smooth_diffusion_down_proj(
-            ffn=block.add_ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache
+            ffn=block.add_ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache,
+            dist_ctx=dist_ctx,
         )
     return smooth_cache
 
@@ -451,6 +474,7 @@ def smooth_diffusion_parallel_transformer_block(
     smooth_cache: dict[str, torch.Tensor],
     block_cache: dict[str, IOTensorsCache] | None = None,
     block_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     assert block.parallel
     assert block.ffn_struct is not None
@@ -465,20 +489,25 @@ def smooth_diffusion_parallel_transformer_block(
                 smooth_cache=smooth_cache,
                 block_cache=block_cache,
                 block_kwargs=block_kwargs,
+                dist_ctx=dist_ctx,
             )
         else:
             smooth_cache = smooth_diffusion_qkv_proj(
-                attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs
+                attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs,
+                dist_ctx=dist_ctx,
             )
         smooth_cache = smooth_diffusion_out_proj(
-            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs
+            attn=attn, config=config, smooth_cache=smooth_cache, block_cache=block_cache, block_kwargs=block_kwargs,
+            dist_ctx=dist_ctx,
         )
     smooth_cache = smooth_diffusion_down_proj(
-        ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache
+        ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache,
+        dist_ctx=dist_ctx,
     )
     if block.add_ffn_struct is not None:
         smooth_cache = smooth_diffusion_down_proj(
-            ffn=block.add_ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache
+            ffn=block.add_ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=block_cache,
+            dist_ctx=dist_ctx,
         )
     return smooth_cache
 
@@ -491,6 +520,7 @@ def smooth_diffusion_module(
     config: DiffusionQuantConfig,
     smooth_cache: dict[str, torch.Tensor],
     layer_cache: dict[str, IOTensorsCache] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     assert isinstance(module, (nn.Linear, nn.Conv2d))
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
@@ -516,6 +546,7 @@ def smooth_diffusion_module(
             eval_inputs=layer_cache[module_name].inputs if layer_cache else None,
             eval_module=module,
             develop_dtype=config.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         ActivationSmoother(smooth_cache[cache_key], channels_dim=channels_dim).as_hook().register(module)
         module.in_smooth_cache_key = cache_key
@@ -532,6 +563,7 @@ def smooth_diffusion_layer(
     smooth_cache: dict[str, torch.Tensor],
     layer_cache: dict[str, IOTensorsCache] | None = None,
     layer_kwargs: dict[str, tp.Any] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> None:
     """Smooth a single diffusion model block.
 
@@ -546,6 +578,8 @@ def smooth_diffusion_layer(
             The layer cache.
         layer_kwargs (`dict[str, tp.Any]`, *optional*):
             The layer keyword arguments.
+        dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+            Distributed calibration context for sample-parallel calibration.
     """
     logger = tools.logging.getLogger(f"{__name__}.SmoothQuant")
     logger.debug("- Smoothing Diffusion Block %s", layer.name)
@@ -569,6 +603,7 @@ def smooth_diffusion_layer(
                         smooth_cache=smooth_cache,
                         block_cache=layer_cache,
                         block_kwargs=layer_kwargs,
+                        dist_ctx=dist_ctx,
                     )
                 else:
                     smooth_cache = smooth_diffusion_sequential_transformer_block(
@@ -577,6 +612,7 @@ def smooth_diffusion_layer(
                         smooth_cache=smooth_cache,
                         block_cache=layer_cache,
                         block_kwargs=layer_kwargs,
+                        dist_ctx=dist_ctx,
                     )
                 tools.logging.Formatter.indent_dec()
         elif isinstance(module, (nn.Linear, nn.Conv2d)):
@@ -587,6 +623,7 @@ def smooth_diffusion_layer(
                 config=config,
                 smooth_cache=smooth_cache,
                 layer_cache=layer_cache,
+                dist_ctx=dist_ctx,
             )
         else:
             needs_quant = config.enabled_wgts and config.wgts.is_enabled_for(module_key)
@@ -602,6 +639,7 @@ def smooth_diffusion(
     model: nn.Module | DiffusionModelStruct,
     config: DiffusionQuantConfig,
     smooth_cache: dict[str, torch.Tensor] | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> dict[str, torch.Tensor]:
     """Smooth the diffusion model.
 
@@ -612,6 +650,8 @@ def smooth_diffusion(
             The quantization configuration.
         smooth_cache (`dict[str, torch.Tensor]`, *optional*):
             The smoothing scales cache.
+        dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+            Distributed calibration context for sample-parallel calibration.
 
     Returns:
         `dict[str, torch.Tensor]`:
@@ -647,10 +687,11 @@ def smooth_diffusion(
                     smooth_cache=smooth_cache,
                     layer_cache=layer_cache,
                     layer_kwargs=layer_kwargs,
+                    dist_ctx=dist_ctx,
                 )
     else:
         for layer in model.block_structs:
-            smooth_diffusion_layer(layer=layer, config=config, smooth_cache=smooth_cache)
+            smooth_diffusion_layer(layer=layer, config=config, smooth_cache=smooth_cache, dist_ctx=dist_ctx)
     if config.smooth.enabled_proj:
         smooth_cache.setdefault("proj.fuse_when_possible", config.smooth.proj.fuse_when_possible)
     if config.smooth.enabled_attn:

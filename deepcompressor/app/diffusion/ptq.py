@@ -9,6 +9,7 @@ from diffusers import DiffusionPipeline
 
 from deepcompressor.app.llm.nn.patch import patch_attention, patch_gemma_rms_norm
 from deepcompressor.app.llm.ptq import ptq as llm_ptq
+from deepcompressor.calib.distributed import DistributedCalibContext
 from deepcompressor.utils import tools
 
 from .config import DiffusionPtqCacheConfig, DiffusionPtqRunConfig, DiffusionQuantCacheConfig, DiffusionQuantConfig
@@ -32,6 +33,7 @@ def ptq(  # noqa: C901
     save_dirpath: str = "",
     copy_on_save: bool = False,
     save_model: bool = False,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> DiffusionModelStruct:
     """Post-training quantization of a diffusion model.
 
@@ -50,6 +52,8 @@ def ptq(  # noqa: C901
             Whether to copy the cache to the save directory.
         save_model (`bool`, *optional*, defaults to `False`):
             Whether to save the quantized model checkpoint.
+        dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+            Distributed calibration context for sample-parallel calibration.
 
     Returns:
         `DiffusionModelStruct`:
@@ -123,10 +127,10 @@ def ptq(  # noqa: C901
         if load_from:
             logger.info(f"- Loading smooth scales from {load_from}")
             smooth_cache = torch.load(load_from)
-            smooth_diffusion(model, config, smooth_cache=smooth_cache)
+            smooth_diffusion(model, config, smooth_cache=smooth_cache, dist_ctx=dist_ctx)
         else:
             logger.info("- Generating smooth scales")
-            smooth_cache = smooth_diffusion(model, config)
+            smooth_cache = smooth_diffusion(model, config, dist_ctx=dist_ctx)
             if cache and cache.path.smooth:
                 logger.info(f"- Saving smooth scales to {cache.path.smooth}")
                 os.makedirs(cache.dirpath.smooth, exist_ok=True)
@@ -196,6 +200,7 @@ def ptq(  # noqa: C901
             quantizer_state_dict=quantizer_state_dict,
             branch_state_dict=branch_state_dict,
             return_with_scale_state_dict=bool(save_dirpath),
+            dist_ctx=dist_ctx,
         )
         if not quantizer_load_from and cache and cache.dirpath.wgts:
             logger.info(f"- Saving weight settings to {cache.path.wgts}")
