@@ -367,10 +367,9 @@ class DiffusionPipelineConfig:
             _num_gpus = torch.cuda.device_count()
 
             if _world_size > 1:
-                # Distributed mode: each rank loads full model to its own GPU
-                # H100 80GB can fit 55GB model + ~20GB calibration cache
+                # Distributed mode: CPU offload per rank to avoid OOM
                 pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-                pipeline = pipeline.to(f"cuda:{_local_rank}")
+                pipeline.enable_model_cpu_offload(gpu_id=_local_rank)
             elif _num_gpus >= 2:
                 # Single-process, multi-GPU: shard model across GPUs via device_map
                 # Uses NVLink/NVSwitch for GPU-GPU data transfer (900 GB/s)

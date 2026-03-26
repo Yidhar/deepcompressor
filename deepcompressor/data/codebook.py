@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from deepcompressor.csrc.load import _C
+from deepcompressor.csrc.load import get_extension
 
 __all__ = ["Codebook"]
 
@@ -47,7 +47,7 @@ class Codebook:
         """
         dtype = tensor.dtype
         tensor = tensor.to(self.values.dtype).contiguous()
-        return _C.round_to_nearest_in_codebook_cuda(tensor, self.values).to(dtype=dtype)
+        return get_extension().round_to_nearest_in_codebook_cuda(tensor, self.values).to(dtype=dtype)
 
     def to(self, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> "Codebook":
         """Move the codebook to the specified device and dtype.
