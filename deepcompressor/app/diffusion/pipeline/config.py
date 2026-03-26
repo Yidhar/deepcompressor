@@ -361,14 +361,10 @@ class DiffusionPipelineConfig:
             # QwenImage models use DiffusionPipeline (not AutoPipelineForText2Image)
             # since they may be edit pipelines (QwenImageEditPlusPipeline)
             pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-        else:
-            pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
-        # For large models (e.g. QwenImage ~55GB), enable model CPU offload
-        # to avoid OOM on single GPU while keeping quantization on cuda
-        if name.startswith("qwen-image"):
             pipeline.enable_model_cpu_offload()
         else:
-            pipeline = pipeline.to(device)
+            pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
+        pipeline = pipeline.to(device)
         model = pipeline.unet if hasattr(pipeline, "unet") else pipeline.transformer
         replace_fused_linear_with_concat_linear(model)
         replace_up_block_conv_with_concat_conv(model)

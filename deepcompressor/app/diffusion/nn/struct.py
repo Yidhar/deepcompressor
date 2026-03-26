@@ -571,6 +571,8 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
     # region relative keys
     norm_rkey: tp.ClassVar[str] = "transformer_norm"
     add_norm_rkey: tp.ClassVar[str] = "transformer_add_norm"
+    mod_rkey: tp.ClassVar[str] = "transformer_mod"
+    """Modulation layers (e.g., img_mod, txt_mod in QwenImage)"""
     attn_struct_cls: tp.ClassVar[type[DiffusionAttentionStruct]] = DiffusionAttentionStruct
     ffn_struct_cls: tp.ClassVar[type[DiffusionFeedForwardStruct]] = DiffusionFeedForwardStruct
     # endregion
@@ -581,12 +583,18 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
     post_attn_add_norms: list[nn.LayerNorm] = field(init=False, repr=False, default_factory=list)
     post_ffn_norm: None = field(init=False, repr=False, default=None)
     post_add_ffn_norm: None = field(init=False, repr=False, default=None)
+    mod: nn.Module | None = None
+    """Modulation layer (e.g., img_mod in QwenImage)"""
+    add_mod: nn.Module | None = None
+    """Additional modulation layer (e.g., txt_mod in QwenImage)"""
     # endregion
     # region relative names
     post_attn_norm_rnames: list[str] = field(init=False, repr=False, default_factory=list)
     post_attn_add_norm_rnames: list[str] = field(init=False, repr=False, default_factory=list)
     post_ffn_norm_rname: str = field(init=False, repr=False, default="")
     post_add_ffn_norm_rname: str = field(init=False, repr=False, default="")
+    mod_rname: str = ""
+    add_mod_rname: str = ""
     # endregion
     # region attributes
     norm_type: str
@@ -595,6 +603,11 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
     # region absolute keys
     norm_key: str = field(init=False, repr=False)
     add_norm_key: str = field(init=False, repr=False)
+    mod_key: str = field(init=False, repr=False, default="")
+    # endregion
+    # region absolute names
+    mod_name: str = field(init=False, repr=False, default="")
+    add_mod_name: str = field(init=False, repr=False, default="")
     # endregion
     # region child structs
     pre_attn_norm_structs: list[DiffusionModuleStruct | None] = field(init=False, repr=False)
@@ -604,6 +617,8 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
     attn_structs: list[DiffusionAttentionStruct] = field(init=False, repr=False)
     ffn_struct: DiffusionFeedForwardStruct | None = field(init=False, repr=False)
     add_ffn_struct: DiffusionFeedForwardStruct | None = field(init=False, repr=False)
+    mod_struct: DiffusionModuleStruct | None = field(init=False, repr=False, default=None)
+    add_mod_struct: DiffusionModuleStruct | None = field(init=False, repr=False, default=None)
     # endregion
 
     def __post_init__(self) -> None:
@@ -634,8 +649,25 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
                 rname=self.pre_add_ffn_norm_rname,
                 rkey=self.add_norm_rkey,
             )
+        # Initialize mod structs (e.g., for QwenImage)
+        if self.mod is not None:
+            self.mod_key = join_name(self.key, self.mod_rkey, sep="_")
+            self.mod_name = join_name(self.name, self.mod_rname)
+            self.mod_struct = DiffusionModuleStruct(
+                self.mod, parent=self, fname="mod", rname=self.mod_rname, rkey=self.mod_rkey
+            )
+        if self.add_mod is not None:
+            self.add_mod_name = join_name(self.name, self.add_mod_rname)
+            self.add_mod_struct = DiffusionModuleStruct(
+                self.add_mod, parent=self, fname="add_mod", rname=self.add_mod_rname, rkey=self.mod_rkey
+            )
 
     def named_key_modules(self) -> tp.Generator[tp.Tuple[str, str, nn.Module, BaseModuleStruct, str], None, None]:
+        # Yield mod layers first (e.g., img_mod, txt_mod in QwenImage)
+        if self.mod_struct is not None:
+            yield from self.mod_struct.named_key_modules()
+        if self.add_mod_struct is not None:
+            yield from self.add_mod_struct.named_key_modules()
         for attn_norm in self.attn_norm_structs:
             if attn_norm.module is not None:
                 yield from attn_norm.named_key_modules()
@@ -737,7 +769,7 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             add_ffn, add_ffn_rname = module.ff_context, "ff_context"
         elif QwenImageTransformerBlock is not None and isinstance(module, QwenImageTransformerBlock):
             parallel = False
-            norm_type = add_norm_type = "ada_norm_zero"
+            norm_type = add_norm_type = "layer_norm"
             pre_attn_norms, pre_attn_norm_rnames = [module.img_norm1], ["img_norm1"]
             attns, attn_rnames = [module.attn], ["attn"]
             pre_attn_add_norms, pre_attn_add_norm_rnames = [module.txt_norm1], ["txt_norm1"]
@@ -745,8 +777,15 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             ffn, ffn_rname = module.img_mlp, "img_mlp"
             pre_add_ffn_norm, pre_add_ffn_norm_rname = module.txt_norm2, "txt_norm2"
             add_ffn, add_ffn_rname = module.txt_mlp, "txt_mlp"
+            mod, mod_rname = module.img_mod, "img_mod"
+            add_mod, add_mod_rname = module.txt_mod, "txt_mod"
         else:
             raise NotImplementedError(f"Unsupported module type: {type(module)}")
+        # mod is optional, only QwenImage has it
+        mod = locals().get("mod", None)
+        mod_rname = locals().get("mod_rname", "")
+        add_mod = locals().get("add_mod", None)
+        add_mod_rname = locals().get("add_mod_rname", "")
         return DiffusionTransformerBlockStruct(
             module=module,
             parent=parent,
@@ -762,6 +801,8 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             ffn=ffn,
             pre_add_ffn_norm=pre_add_ffn_norm,
             add_ffn=add_ffn,
+            mod=mod,
+            add_mod=add_mod,
             pre_attn_norm_rnames=pre_attn_norm_rnames,
             pre_attn_add_norm_rnames=pre_attn_add_norm_rnames,
             attn_rnames=attn_rnames,
@@ -769,6 +810,8 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             ffn_rname=ffn_rname,
             pre_add_ffn_norm_rname=pre_add_ffn_norm_rname,
             add_ffn_rname=add_ffn_rname,
+            mod_rname=mod_rname,
+            add_mod_rname=add_mod_rname,
             norm_type=norm_type,
             add_norm_type=add_norm_type,
         )
@@ -812,6 +855,9 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
         key_map[down_proj_rkey].add(down_proj_key)
         key_map[add_up_proj_rkey].add(add_up_proj_key)
         key_map[add_down_proj_rkey].add(add_down_proj_key)
+        # Add mod key for modulation layers (e.g., img_mod, txt_mod in QwenImage)
+        mod_rkey = mod_key = cls.mod_rkey
+        key_map[mod_rkey].add(mod_key)
         return {k: v for k, v in key_map.items() if v}
 
 
