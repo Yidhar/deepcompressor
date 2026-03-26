@@ -651,10 +651,11 @@ if __name__ == "__main__":
                 "axes_dims_rope": [16, 56, 56],
             }
         # Detect LoRA rank from branch_dict
+        # a.weight shape is (rank, in_features), so rank = min dimension
         rank = 32
         for k in branch_dict:
             if isinstance(branch_dict[k], dict) and "a.weight" in branch_dict[k]:
-                rank = branch_dict[k]["a.weight"].shape[1]
+                rank = min(branch_dict[k]["a.weight"].shape)
                 break
         quant_config = {"rank": rank, "precision": "fp4" if args.float_point else "int4"}
         metadata = {

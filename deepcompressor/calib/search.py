@@ -692,6 +692,13 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         eval_kwargs: dict[str, tp.Any],
         **kwargs,
     ) -> tp.Any:
+        # Determine distributed context for this calibration
+        # Fall back to non-distributed if too few samples for sharding
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
+            _num_check = len(ipts.front().data) if ipts is not None else 0
+            if not _dist_ctx.validate_sample_count(_num_check):
+                _dist_ctx = None
         # region Step 1: Calculate the baseline
         if self.objective == SearchBasedCalibObjective.TensorError:
             if orig_wgts is None:
@@ -729,7 +736,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             _num_orig_samples = len(orig_ipts.front().data)
             _local_orig_indices = (
-                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+                _dist_ctx.shard_indices(_num_orig_samples) if _dist_ctx is not None else range(_num_orig_samples)
             )
             for j, (_, w) in enumerate(orig_wgts):
                 w = _reshape_w(w, view_shape=w_view_shapes[j])
@@ -767,7 +774,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             _num_orig_samples = len(orig_ipts.front().data)
             _local_orig_indices = (
-                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+                _dist_ctx.shard_indices(_num_orig_samples) if _dist_ctx is not None else range(_num_orig_samples)
             )
             for i in _local_orig_indices:
                 ipt = orig_ipts.extract(i, eval_kwargs)
@@ -786,10 +793,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         torch.cuda.empty_cache()
         self.logger.debug(f"+ finished calculating the original outputs, ram usage: {psutil.virtual_memory().percent}")
         # endregion
-        # Precompute local sample indices for distributed calibration
-        _dist_ctx = self.dist_ctx
-        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
-            _dist_ctx.validate_sample_count(len(ipts.front().data))
+        # _dist_ctx already determined at method start
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []
@@ -881,6 +885,12 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         eval_kwargs: dict[str, tp.Any],
         **kwargs,
     ) -> tp.Any:
+        # Determine distributed context
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
+            _num_check = len(ipts.front().data) if ipts is not None else 0
+            if not _dist_ctx.validate_sample_count(_num_check):
+                _dist_ctx = None
         if orig_ipts is None:
             orig_ipts = ipts
         assert ipts.num_tensors == orig_ipts.num_tensors
@@ -922,7 +932,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             _num_orig_samples = len(orig_ipts.front().data)
             _local_orig_indices = (
-                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+                _dist_ctx.shard_indices(_num_orig_samples) if _dist_ctx is not None else range(_num_orig_samples)
             )
             for j, (_, w) in enumerate(orig_wgts):
                 w = _reshape_w(w, view_shape=x_view_shapes[0])
@@ -948,7 +958,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             _num_orig_samples = len(orig_ipts.front().data)
             _local_orig_indices = (
-                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+                _dist_ctx.shard_indices(_num_orig_samples) if _dist_ctx is not None else range(_num_orig_samples)
             )
             for i in _local_orig_indices:
                 ipt = orig_ipts.extract(i, eval_kwargs)
@@ -966,10 +976,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         gc.collect()
         torch.cuda.empty_cache()
         # endregion
-        # Precompute local sample indices for distributed calibration
-        _dist_ctx = self.dist_ctx
-        if _dist_ctx is not None and self.objective != SearchBasedCalibObjective.TensorError:
-            _dist_ctx.validate_sample_count(len(ipts.front().data))
+        # _dist_ctx already determined at method start
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []
@@ -1069,6 +1076,12 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         eval_kwargs: dict[str, tp.Any],
         **kwargs,
     ) -> tp.Any:
+        # Determine distributed context
+        _dist_ctx = self.dist_ctx
+        if _dist_ctx is not None:
+            _num_check = len(eval_inputs.front().data) if eval_inputs is not None else 0
+            if not _dist_ctx.validate_sample_count(_num_check):
+                _dist_ctx = None
         # region Step 1: Calculate the outputs
         if self.objective == SearchBasedCalibObjective.OutputsError:
             assert eval_inputs is not None, "eval_inputs should not be None when objective is OutputsError"
@@ -1092,7 +1105,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             _num_orig_samples = len(orig_eval_inputs.front().data)
             _local_orig_indices = (
-                self.dist_ctx.shard_indices(_num_orig_samples) if self.dist_ctx is not None else range(_num_orig_samples)
+                _dist_ctx.shard_indices(_num_orig_samples) if _dist_ctx is not None else range(_num_orig_samples)
             )
             for i in _local_orig_indices:
                 ipt = orig_eval_inputs.extract(i, eval_kwargs)
@@ -1112,10 +1125,7 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
         gc.collect()
         torch.cuda.empty_cache()
         # endregion
-        # Precompute local sample indices for distributed calibration
-        _dist_ctx = self.dist_ctx
-        if _dist_ctx is not None:
-            _dist_ctx.validate_sample_count(len(eval_inputs.front().data))
+        # _dist_ctx already determined at method start
         while not self.is_done():
             self.ask()
             e: list[torch.Tensor] = []

@@ -360,11 +360,36 @@ class DiffusionPipelineConfig:
         elif name.startswith("qwen-image"):
             # QwenImage models use DiffusionPipeline (not AutoPipelineForText2Image)
             # since they may be edit pipelines (QwenImageEditPlusPipeline)
-            pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-            pipeline.enable_model_cpu_offload()
+            import os as _os
+            import torch.distributed as _dist
+            _local_rank = int(_os.environ.get("LOCAL_RANK", 0))
+            _world_size = int(_os.environ.get("WORLD_SIZE", 1))
+            _num_gpus = torch.cuda.device_count()
+
+            if _world_size > 1:
+                # Distributed mode: each rank loads full model to its own GPU
+                # H100 80GB can fit 55GB model + ~20GB calibration cache
+                pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
+                pipeline = pipeline.to(f"cuda:{_local_rank}")
+            elif _num_gpus >= 2:
+                # Single-process, multi-GPU: shard model across GPUs via device_map
+                # Uses NVLink/NVSwitch for GPU-GPU data transfer (900 GB/s)
+                # instead of CPU offload (64 GB/s PCIe)
+                pipeline = DiffusionPipeline.from_pretrained(
+                    path, torch_dtype=dtype, device_map="balanced"
+                )
+            else:
+                # Single GPU: direct load if fits, otherwise CPU offload
+                pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
+                try:
+                    pipeline = pipeline.to(device)
+                except torch.cuda.OutOfMemoryError:
+                    pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
+                    pipeline.enable_model_cpu_offload()
         else:
             pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
-        pipeline = pipeline.to(device)
+        if not name.startswith("qwen-image"):
+            pipeline = pipeline.to(device)
         model = pipeline.unet if hasattr(pipeline, "unet") else pipeline.transformer
         replace_fused_linear_with_concat_linear(model)
         replace_up_block_conv_with_concat_conv(model)

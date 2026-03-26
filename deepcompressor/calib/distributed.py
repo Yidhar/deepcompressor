@@ -137,24 +137,25 @@ class DistributedCalibContext:
                 dist.all_reduce(e, op=dist.ReduceOp.SUM, group=self.group)
         return errors
 
-    def validate_sample_count(self, num_samples: int) -> None:
-        """Assert that there are enough samples for every rank.
+    def validate_sample_count(self, num_samples: int) -> bool:
+        """Check if there are enough samples for distributed sharding.
 
         When ``num_samples < world_size`` some ranks would receive zero
-        samples, leaving their error tensors as ``None``. Because
-        ``dist.all_reduce`` is a collective that every rank must call
-        with tensors of the same shape, having ``None`` on some ranks
-        causes a deadlock or crash.
-
-        Call this once per calibration invocation, before entering the
-        search loop.
+        samples. In this case, return False to signal the caller should
+        fall back to non-distributed mode (all ranks process all samples).
 
         Args:
             num_samples: The total number of calibration samples.
 
-        Raises:
-            ValueError: If ``num_samples < world_size``.
+        Returns:
+            True if sharding is safe, False if caller should skip sharding.
         """
+        if self.is_distributed and num_samples < self.world_size:
+            return False
+        return True
+
+    def _validate_sample_count_strict(self, num_samples: int) -> None:
+        """Strict version that raises an error. Kept for reference."""
         if self.is_distributed and num_samples < self.world_size:
             raise ValueError(
                 f"Sample-parallel calibration requires at least as many "
