@@ -88,21 +88,27 @@ class DiffusionCalibDataset(DiffusionDataset):
         This ensures tree_collate works correctly at any batch_size.
         """
         for mask_key in ("encoder_attention_mask", "encoder_hidden_states_mask"):
-            samples_with_mask = [
-                d for d in data
-                if mask_key in d.get("input_kwargs", {}) and d["input_kwargs"][mask_key] is not None
+            samples_with_hidden_states = [
+                d
+                for d in data
+                if mask_key in d.get("input_kwargs", {})
+                and d["input_kwargs"].get("encoder_hidden_states") is not None
             ]
-            if not samples_with_mask:
+            if not samples_with_hidden_states:
                 continue
-            # Find dataset-global max length from masks
-            target_len = max(d["input_kwargs"][mask_key].shape[-1] for d in samples_with_mask)
-            for d in samples_with_mask:
+            # Find dataset-global max length from encoder hidden states.
+            target_len = max(d["input_kwargs"]["encoder_hidden_states"].shape[1] for d in samples_with_hidden_states)
+            for d in samples_with_hidden_states:
                 kwargs = d["input_kwargs"]
-                mask = kwargs[mask_key]
                 ehs = kwargs.get("encoder_hidden_states")
+                assert ehs is not None
+                mask = kwargs.get(mask_key)
+                if mask is None:
+                    mask = torch.ones(ehs.shape[:2], dtype=torch.bool)
+                    kwargs[mask_key] = mask
                 mask_len = mask.shape[-1]
                 # Pad encoder_hidden_states to target_len
-                if ehs is not None and ehs.shape[1] < target_len:
+                if ehs.shape[1] < target_len:
                     kwargs["encoder_hidden_states"] = torch.nn.functional.pad(
                         ehs, (0, 0, 0, target_len - ehs.shape[1])
                     )

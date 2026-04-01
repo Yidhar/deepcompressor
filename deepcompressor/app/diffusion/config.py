@@ -122,6 +122,7 @@ class DiffusionPtqRunConfig:
             model=self.pipeline.name,
             protocol=self.eval.protocol,
             data=self.quant.calib.data,
+            num_samples=self.quant.calib.num_samples,
         )
         if self.quant.calib.path:
             self.quant.calib.path = os.path.abspath(os.path.expanduser(self.quant.calib.path))

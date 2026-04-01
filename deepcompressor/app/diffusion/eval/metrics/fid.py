@@ -56,7 +56,8 @@ def get_fid_features(
         npz = np.load(cache_path)
         mu, sigma = npz["mu"], npz["sigma"]
     else:
-        feat_model = fid.build_feature_extractor(mode, device)
+        use_dataparallel = str(device) != "cpu"
+        feat_model = fid.build_feature_extractor(mode, device, use_dataparallel=use_dataparallel)
         if isinstance(dataset_or_folder, str):
             np_feats = fid.get_folder_features(
                 dataset_or_folder,
@@ -91,6 +92,7 @@ def compute_fid(
     gen_cache_path: str | None = None,
     use_symlink: bool = True,
     timestamp: str | None = None,
+    device: str | torch.device = "cuda",
 ) -> float:
     sym_ref_dirpath, sym_gen_dirpath = None, None
     if use_symlink:
@@ -107,8 +109,8 @@ def compute_fid(
         sym_gen_dirpath = os.path.join(".tmp", f"gen-{hash(str(gen_dirpath))}-{timestamp}")
         os.symlink(os.path.abspath(gen_dirpath), os.path.abspath(sym_gen_dirpath))
         gen_dirpath = sym_gen_dirpath
-    mu1, sigma1 = get_fid_features(dataset_or_folder=ref_dirpath_or_dataset, cache_path=ref_cache_path)
-    mu2, sigma2 = get_fid_features(dataset_or_folder=gen_dirpath, cache_path=gen_cache_path)
+    mu1, sigma1 = get_fid_features(dataset_or_folder=ref_dirpath_or_dataset, cache_path=ref_cache_path, device=device)
+    mu2, sigma2 = get_fid_features(dataset_or_folder=gen_dirpath, cache_path=gen_cache_path, device=device)
     fid_score = fid.frechet_distance(mu1, sigma1, mu2, sigma2)
     fid_score = float(fid_score)
     if use_symlink:

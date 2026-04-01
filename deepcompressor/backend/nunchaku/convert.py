@@ -640,6 +640,8 @@ if __name__ == "__main__":
 
     # Build metadata for nunchaku from_pretrained compatibility
     metadata = {}
+    model_config: dict[str, object] | None = None
+    comfy_config: dict[str, object] = {}
     if model_type == "qwenimage" and args.model_path:
         config_path = os.path.join(args.model_path, "transformer", "config.json")
         if os.path.exists(config_path):
@@ -650,13 +652,13 @@ if __name__ == "__main__":
                 "_class_name": "QwenImageTransformer2DModel",
                 "axes_dims_rope": [16, 56, 56],
             }
-        # Detect LoRA rank from branch_dict
-        # a.weight shape is (rank, in_features), so rank = min dimension
-        rank = 32
-        for k in branch_dict:
-            if isinstance(branch_dict[k], dict) and "a.weight" in branch_dict[k]:
-                rank = min(branch_dict[k]["a.weight"].shape)
-                break
+        # Prefer the converted QwenImage low-rank tensors; fall back to branch_dict for older exports.
+        rank = next((v.shape[1] for k, v in converted_state_dict.items() if ".proj_down" in k), 32)
+        if rank == 32:
+            for k in branch_dict:
+                if isinstance(branch_dict[k], dict) and "a.weight" in branch_dict[k]:
+                    rank = min(branch_dict[k]["a.weight"].shape)
+                    break
         quant_config = {"rank": rank, "precision": "fp4" if args.float_point else "int4"}
         metadata = {
             "config": _json.dumps(model_config),
@@ -671,4 +673,9 @@ if __name__ == "__main__":
         metadata=metadata,
     )
     safetensors.torch.save_file(other_state_dict, os.path.join(output_dirpath, "unquantized_layers.safetensors"))
+    if model_config is not None:
+        with open(os.path.join(output_dirpath, "config.json"), "w", encoding="utf-8") as f:
+            _json.dump(model_config, f, indent=2)
+        with open(os.path.join(output_dirpath, "comfy_config.json"), "w", encoding="utf-8") as f:
+            _json.dump(comfy_config, f, indent=2)
     print(f"Quantized model saved to {output_dirpath}.")

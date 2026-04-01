@@ -31,7 +31,7 @@ eval:
 quant:
   calib:
     data: qdiff
-    path: datasets/{dtype}/{model}/{protocol}/{data}/s128
+    path: datasets/{dtype}/{model}/{protocol}/{data}/s{num_samples}
     num_samples: 128
     num_workers: 8
   wgts:

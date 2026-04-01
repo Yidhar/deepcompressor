@@ -56,6 +56,23 @@ class MultiImageDataset(data.Dataset):
         return [gen_tensor, ref_tensor]
 
 
+def _collate_image_pairs(batch: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
+    return batch
+
+
+def _group_pairs_by_shape(batch: list[list[torch.Tensor]]) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    grouped: dict[tuple[int, ...], list[list[torch.Tensor]]] = {}
+    for gen_tensor, ref_tensor in batch:
+        assert gen_tensor.shape == ref_tensor.shape
+        grouped.setdefault(tuple(gen_tensor.shape), [[], []])
+        grouped[tuple(gen_tensor.shape)][0].append(gen_tensor)
+        grouped[tuple(gen_tensor.shape)][1].append(ref_tensor)
+    return [
+        (torch.stack(gen_tensors, dim=0), torch.stack(ref_tensors, dim=0))
+        for gen_tensors, ref_tensors in grouped.values()
+    ]
+
+
 def compute_image_similarity_metrics(
     ref_dirpath_or_dataset: str | datasets.Dataset,
     gen_dirpath: str,
@@ -80,7 +97,12 @@ def compute_image_similarity_metrics(
         metrics[metric_name] = metric
     dataset = MultiImageDataset(gen_dirpath, ref_dirpath_or_dataset)
     dataloader = data.DataLoader(
-        dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, drop_last=False
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=_collate_image_pairs,
     )
     with torch.no_grad():
         desc = (
@@ -89,8 +111,10 @@ def compute_image_similarity_metrics(
             else os.path.basename(ref_dirpath_or_dataset)
         ) + " similarity metrics"
         for batch in tqdm(dataloader, desc=desc):
-            batch = [tensor.to(device) for tensor in batch]
-            for metric in metrics.values():
-                metric.update(batch[0], batch[1])
+            for gen_batch, ref_batch in _group_pairs_by_shape(batch):
+                gen_batch = gen_batch.to(device)
+                ref_batch = ref_batch.to(device)
+                for metric in metrics.values():
+                    metric.update(gen_batch, ref_batch)
     result = {metric_name: metric.compute().item() for metric_name, metric in metrics.items()}
     return result

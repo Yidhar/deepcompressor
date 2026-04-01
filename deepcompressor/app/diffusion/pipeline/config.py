@@ -17,6 +17,12 @@ from omniconfig import configclass
 from torch import nn
 from transformers import PreTrainedModel, PreTrainedTokenizer, T5EncoderModel
 
+try:
+    from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+except ImportError:
+    QwenImageEditPipeline = None
+    QwenImageEditPlusPipeline = None
+
 from deepcompressor.data.utils.dtype import eval_dtype
 from deepcompressor.quantizer.processor import Quantizer
 from deepcompressor.utils import tools
@@ -29,8 +35,20 @@ from ..nn.patch import (
     replace_up_block_conv_with_concat_conv,
     shift_input_activations,
 )
+from ..qwenimage import QwenImagePipelineWithSeqLen as QwenImagePipeline
 
 __all__ = ["DiffusionPipelineConfig"]
+
+
+def _is_qwen_image_name(name: str) -> bool:
+    return name in ("qwenimage", "qwen-image")
+
+
+def _get_qwen_image_edit_suffix(name: str) -> str | None:
+    for prefix in ("qwenimage-edit", "qwen-image-edit"):
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+    return None
 
 
 @configclass
@@ -101,6 +119,8 @@ class DiffusionPipelineConfig:
             self.task = "depth-to-image"
         elif self.name == "flux.1-fill-dev":
             self.task = "inpainting"
+        elif _get_qwen_image_edit_suffix(self.name) is not None:
+            self.task = "image-edit"
 
     def build(
         self, *, dtype: str | torch.dtype | None = None, device: str | torch.device | None = None
@@ -344,6 +364,10 @@ class DiffusionPipelineConfig:
                 path = "black-forest-labs/FLUX.1-Fill-dev"
             elif name == "flux.1-schnell":
                 path = "black-forest-labs/FLUX.1-schnell"
+            elif _is_qwen_image_name(name):
+                path = "Qwen/Qwen-Image"
+            elif (edit_suffix := _get_qwen_image_edit_suffix(name)) is not None:
+                path = f"Qwen/Qwen-Image-Edit{edit_suffix}"
             else:
                 raise ValueError(f"Path for {name} is not specified.")
         if name in ["flux.1-canny-dev", "flux.1-depth-dev"]:
@@ -357,38 +381,20 @@ class DiffusionPipelineConfig:
                 pipeline.text_encoder.to(dtype)
             else:
                 pipeline = SanaPipeline.from_pretrained(path, torch_dtype=dtype)
-        elif name.startswith("qwen-image"):
-            # QwenImage models use DiffusionPipeline (not AutoPipelineForText2Image)
-            # since they may be edit pipelines (QwenImageEditPlusPipeline)
-            import os as _os
-            import torch.distributed as _dist
-            _local_rank = int(_os.environ.get("LOCAL_RANK", 0))
-            _world_size = int(_os.environ.get("WORLD_SIZE", 1))
-            _num_gpus = torch.cuda.device_count()
-
-            if _world_size > 1:
-                # Distributed mode: CPU offload per rank to avoid OOM
-                pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-                pipeline.enable_model_cpu_offload(gpu_id=_local_rank)
-            elif _num_gpus >= 2:
-                # Single-process, multi-GPU: shard model across GPUs via device_map
-                # Uses NVLink/NVSwitch for GPU-GPU data transfer (900 GB/s)
-                # instead of CPU offload (64 GB/s PCIe)
-                pipeline = DiffusionPipeline.from_pretrained(
-                    path, torch_dtype=dtype, device_map="balanced"
-                )
+        elif _is_qwen_image_name(name):
+            pipeline = QwenImagePipeline.from_pretrained(path, torch_dtype=dtype)
+        elif (edit_suffix := _get_qwen_image_edit_suffix(name)) is not None:
+            if edit_suffix:
+                if QwenImageEditPlusPipeline is None:
+                    raise ImportError("QwenImageEditPlusPipeline requires diffusers>=0.36.0.")
+                pipeline = QwenImageEditPlusPipeline.from_pretrained(path, torch_dtype=dtype)
             else:
-                # Single GPU: direct load if fits, otherwise CPU offload
-                pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-                try:
-                    pipeline = pipeline.to(device)
-                except torch.cuda.OutOfMemoryError:
-                    pipeline = DiffusionPipeline.from_pretrained(path, torch_dtype=dtype)
-                    pipeline.enable_model_cpu_offload()
+                if QwenImageEditPipeline is None:
+                    raise ImportError("QwenImageEditPipeline is not available in the installed diffusers version.")
+                pipeline = QwenImageEditPipeline.from_pretrained(path, torch_dtype=dtype)
         else:
             pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
-        if not name.startswith("qwen-image"):
-            pipeline = pipeline.to(device)
+        pipeline = pipeline.to(device)
         model = pipeline.unet if hasattr(pipeline, "unet") else pipeline.transformer
         replace_fused_linear_with_concat_linear(model)
         replace_up_block_conv_with_concat_conv(model)

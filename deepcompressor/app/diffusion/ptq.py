@@ -139,7 +139,7 @@ def ptq(  # noqa: C901
         if save_path:
             if not copy_on_save and load_from:
                 logger.info(f"- Linking smooth scales to {save_path.smooth}")
-                os.symlink(os.path.relpath(load_from, save_dirpath), save_path.smooth)
+                os.path.exists(save_path.smooth) or os.symlink(os.path.relpath(load_from, save_dirpath), save_path.smooth)
             else:
                 logger.info(f"- Saving smooth scales to {save_path.smooth}")
                 torch.save(smooth_cache, save_path.smooth)
@@ -215,13 +215,13 @@ def ptq(  # noqa: C901
         if save_path:
             if not copy_on_save and quantizer_load_from:
                 logger.info(f"- Linking weight settings to {save_path.wgts}")
-                os.symlink(os.path.relpath(quantizer_load_from, save_dirpath), save_path.wgts)
+                os.path.exists(save_path.wgts) or os.symlink(os.path.relpath(quantizer_load_from, save_dirpath), save_path.wgts)
             else:
                 logger.info(f"- Saving weight settings to {save_path.wgts}")
                 torch.save(quantizer_state_dict, save_path.wgts)
             if not copy_on_save and branch_load_from:
                 logger.info(f"- Linking branch settings to {save_path.branch}")
-                os.symlink(os.path.relpath(branch_load_from, save_dirpath), save_path.branch)
+                os.path.exists(save_path.branch) or os.symlink(os.path.relpath(branch_load_from, save_dirpath), save_path.branch)
             else:
                 logger.info(f"- Saving branch settings to {save_path.branch}")
                 torch.save(branch_state_dict, save_path.branch)
@@ -259,7 +259,7 @@ def ptq(  # noqa: C901
             if save_dirpath:
                 if not copy_on_save and load_from:
                     logger.info(f"- Linking activation quantizer settings to {save_path.acts}")
-                    os.symlink(os.path.relpath(load_from, save_dirpath), save_path.acts)
+                    os.path.exists(save_path.acts) or os.symlink(os.path.relpath(load_from, save_dirpath), save_path.acts)
                 else:
                     logger.info(f"- Saving activation quantizer settings to {save_path.acts}")
                     torch.save(quantizer_state_dict, save_path.acts)

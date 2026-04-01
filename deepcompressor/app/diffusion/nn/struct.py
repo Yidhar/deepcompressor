@@ -6,8 +6,10 @@ import typing as tp
 from abc import abstractmethod
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 # region imports
+
 import torch.nn as nn
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU, SwiGLU
 from diffusers.models.attention import BasicTransformerBlock, FeedForward, JointTransformerBlock
@@ -31,26 +33,16 @@ from diffusers.models.transformers.pixart_transformer_2d import PixArtTransforme
 from diffusers.models.transformers.sana_transformer import GLUMBConv, SanaTransformer2DModel, SanaTransformerBlock
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
 from diffusers.models.transformers.transformer_flux import (
+    FluxAttention,
     FluxSingleTransformerBlock,
     FluxTransformer2DModel,
     FluxTransformerBlock,
 )
+from diffusers.models.transformers.transformer_qwenimage import (
+    QwenImageTransformer2DModel,
+    QwenImageTransformerBlock,
+)
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
-
-try:
-    from diffusers.models.transformers.transformer_qwenimage import (
-        QwenImageTransformer2DModel,
-        QwenImageTransformerBlock,
-    )
-except ImportError:
-    QwenImageTransformer2DModel = None
-    QwenImageTransformerBlock = None
-
-try:
-    from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
-except ImportError:
-    QwenImageEditPlusPipeline = None
-
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
@@ -73,6 +65,12 @@ from diffusers.pipelines import (
     StableDiffusionXLPipeline,
 )
 
+try:
+    from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+except ImportError:
+    QwenImageEditPipeline = None
+    QwenImageEditPlusPipeline = None
+
 from deepcompressor.nn.patch.conv import ConcatConv2d, ShiftedConv2d
 from deepcompressor.nn.patch.linear import ConcatLinear, ShiftedLinear
 from deepcompressor.nn.struct.attn import (
@@ -87,6 +85,7 @@ from deepcompressor.nn.struct.base import BaseModuleStruct
 from deepcompressor.utils.common import join_name
 
 from .attention import DiffusionAttentionProcessor
+from ..qwenimage import QwenImagePipelineWithSeqLen as QwenImagePipeline
 
 # endregion
 
@@ -94,16 +93,14 @@ from .attention import DiffusionAttentionProcessor
 __all__ = ["DiffusionModelStruct", "DiffusionBlockStruct", "DiffusionModelStruct"]
 
 
-_dit_block_types = [
+DIT_BLOCK_CLS = tp.Union[
     BasicTransformerBlock,
     JointTransformerBlock,
     FluxSingleTransformerBlock,
     FluxTransformerBlock,
+    QwenImageTransformerBlock,
     SanaTransformerBlock,
 ]
-if QwenImageTransformerBlock is not None:
-    _dit_block_types.append(QwenImageTransformerBlock)
-DIT_BLOCK_CLS = tp.Union[tuple(_dit_block_types)]
 UNET_BLOCK_CLS = tp.Union[
     DownBlock2D,
     CrossAttnDownBlock2D,
@@ -112,32 +109,33 @@ UNET_BLOCK_CLS = tp.Union[
     UpBlock2D,
     CrossAttnUpBlock2D,
 ]
-_dit_cls_types = [
+DIT_CLS = tp.Union[
     Transformer2DModel,
     PixArtTransformer2DModel,
+    QwenImageTransformer2DModel,
     SD3Transformer2DModel,
     FluxTransformer2DModel,
     SanaTransformer2DModel,
 ]
-if QwenImageTransformer2DModel is not None:
-    _dit_cls_types.append(QwenImageTransformer2DModel)
-DIT_CLS = tp.Union[tuple(_dit_cls_types)]
 UNET_CLS = tp.Union[UNet2DModel, UNet2DConditionModel]
 MODEL_CLS = tp.Union[DIT_CLS, UNET_CLS]
 UNET_PIPELINE_CLS = tp.Union[StableDiffusionPipeline, StableDiffusionXLPipeline]
-_dit_pipeline_types = [
+DIT_PIPELINE_CLS = tp.Union[
     StableDiffusion3Pipeline,
     PixArtAlphaPipeline,
     PixArtSigmaPipeline,
     FluxPipeline,
     FluxControlPipeline,
     FluxFillPipeline,
+    QwenImagePipeline,
     SanaPipeline,
 ]
-if QwenImageEditPlusPipeline is not None:
-    _dit_pipeline_types.append(QwenImageEditPlusPipeline)
-DIT_PIPELINE_CLS = tp.Union[tuple(_dit_pipeline_types)]
 PIPELINE_CLS = tp.Union[UNET_PIPELINE_CLS, DIT_PIPELINE_CLS]
+QWEN_IMAGE_EDIT_PIPELINE_CLS = tuple(
+    pipeline_cls
+    for pipeline_cls in (QwenImageEditPipeline, QwenImageEditPlusPipeline)
+    if pipeline_cls is not None
+)
 
 
 @dataclass(kw_only=True)
@@ -282,7 +280,9 @@ class DiffusionModelStruct(DiffusionBlockStruct):
     ) -> "DiffusionModelStruct":
         if isinstance(module, UNET_PIPELINE_CLS):
             module = module.unet
-        elif isinstance(module, DIT_PIPELINE_CLS):
+        elif isinstance(module, DIT_PIPELINE_CLS) or (
+            QWEN_IMAGE_EDIT_PIPELINE_CLS and isinstance(module, QWEN_IMAGE_EDIT_PIPELINE_CLS)
+        ):
             module = module.transformer
         if isinstance(module, UNET_CLS):
             return UNetStruct.construct(module, parent=parent, fname=fname, rname=rname, rkey=rkey, idx=idx, **kwargs)
@@ -352,8 +352,7 @@ class DiffusionAttentionStruct(AttentionStruct):
                 attn_kwargs["attention_mask"] = kwargs.get("attention_mask", None)
             else:
                 attn_kwargs["attention_mask"] = kwargs.get("encoder_attention_mask", None)
-        elif QwenImageTransformerBlock is not None and isinstance(self.parent.module, QwenImageTransformerBlock):
-            # QwenImage passes attention_mask and image_rotary_emb via joint_attention_kwargs
+        elif isinstance(self.parent.module, QwenImageTransformerBlock):
             joint_kwargs = kwargs.get("joint_attention_kwargs", {}) or {}
             attn_kwargs = dict(joint_kwargs.items())
             if "image_rotary_emb" not in attn_kwargs:
@@ -373,7 +372,20 @@ class DiffusionAttentionStruct(AttentionStruct):
         idx: int = 0,
         **kwargs,
     ) -> "DiffusionAttentionStruct":
-        if module.is_cross_attention:
+        # FluxAttention doesn't have is_cross_attention attribute
+        if isinstance(module, FluxAttention):
+            # FluxAttention always has to_q, to_k, to_v
+            q_proj, k_proj, v_proj = module.to_q, module.to_k, module.to_v
+            add_q_proj = getattr(module, "add_q_proj", None)
+            add_k_proj = getattr(module, "add_k_proj", None)
+            add_v_proj = getattr(module, "add_v_proj", None)
+            add_o_proj = getattr(module, "to_add_out", None)
+            q_proj_rname, k_proj_rname, v_proj_rname = "to_q", "to_k", "to_v"
+            add_q_proj_rname = "add_q_proj" if add_q_proj is not None else ""
+            add_k_proj_rname = "add_k_proj" if add_k_proj is not None else ""
+            add_v_proj_rname = "add_v_proj" if add_v_proj is not None else ""
+            add_o_proj_rname = "to_add_out" if add_o_proj is not None else ""
+        elif module.is_cross_attention:
             q_proj, k_proj, v_proj = module.to_q, None, None
             add_q_proj, add_k_proj, add_v_proj, add_o_proj = None, module.to_k, module.to_v, None
             q_proj_rname, k_proj_rname, v_proj_rname = "to_q", "", ""
@@ -385,8 +397,10 @@ class DiffusionAttentionStruct(AttentionStruct):
             add_v_proj = getattr(module, "add_v_proj", None)
             add_o_proj = getattr(module, "to_add_out", None)
             q_proj_rname, k_proj_rname, v_proj_rname = "to_q", "to_k", "to_v"
-            add_q_proj_rname, add_k_proj_rname, add_v_proj_rname = "add_q_proj", "add_k_proj", "add_v_proj"
-            add_o_proj_rname = "to_add_out"
+            add_q_proj_rname = "add_q_proj" if add_q_proj is not None else ""
+            add_k_proj_rname = "add_k_proj" if add_k_proj is not None else ""
+            add_v_proj_rname = "add_v_proj" if add_v_proj is not None else ""
+            add_o_proj_rname = "to_add_out" if add_o_proj is not None else ""
         if getattr(module, "to_out", None) is not None:
             o_proj = module.to_out[0]
             o_proj_rname = "to_out.0"
@@ -405,12 +419,22 @@ class DiffusionAttentionStruct(AttentionStruct):
             with_rope = True
         else:
             with_rope = False  # TODO: fix for other processors
+        # Calculate num_key_value_heads safely for different attention types
+        if k_proj is not None:
+            # Standard attention: calculate from k_proj
+            num_key_value_heads = k_proj.weight.shape[0] // (q_proj.weight.shape[0] // module.heads)
+        elif add_k_proj is not None:
+            # Cross attention or Flux attention with context: calculate from add_k_proj
+            num_key_value_heads = add_k_proj.weight.shape[0] // (q_proj.weight.shape[0] // module.heads)
+        else:
+            # Fallback: assume same as query heads
+            num_key_value_heads = module.heads
         config = AttentionConfigStruct(
             hidden_size=q_proj.weight.shape[1],
             add_hidden_size=add_k_proj.weight.shape[1] if add_k_proj is not None else 0,
             inner_size=q_proj.weight.shape[0],
             num_query_heads=module.heads,
-            num_key_value_heads=module.to_k.weight.shape[0] // (module.to_q.weight.shape[0] // module.heads),
+            num_key_value_heads=num_key_value_heads,
             with_qk_norm=module.norm_q is not None,
             with_rope=with_rope,
             linear_attn=isinstance(module.processor, SanaLinearAttnProcessor2_0),
@@ -600,14 +624,14 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
     norm_type: str
     add_norm_type: str
     # endregion
+    # region absolute names
+    mod_name: str = field(init=False, repr=False, default="")
+    add_mod_name: str = field(init=False, repr=False, default="")
+    # endregion
     # region absolute keys
     norm_key: str = field(init=False, repr=False)
     add_norm_key: str = field(init=False, repr=False)
     mod_key: str = field(init=False, repr=False, default="")
-    # endregion
-    # region absolute names
-    mod_name: str = field(init=False, repr=False, default="")
-    add_mod_name: str = field(init=False, repr=False, default="")
     # endregion
     # region child structs
     pre_attn_norm_structs: list[DiffusionModuleStruct | None] = field(init=False, repr=False)
@@ -767,7 +791,7 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             ffn, ffn_rname = module.ff, "ff"
             pre_add_ffn_norm, pre_add_ffn_norm_rname = module.norm2_context, "norm2_context"
             add_ffn, add_ffn_rname = module.ff_context, "ff_context"
-        elif QwenImageTransformerBlock is not None and isinstance(module, QwenImageTransformerBlock):
+        elif isinstance(module, QwenImageTransformerBlock):
             parallel = False
             norm_type = add_norm_type = "layer_norm"
             pre_attn_norms, pre_attn_norm_rnames = [module.img_norm1], ["img_norm1"]
@@ -1659,6 +1683,8 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
     """temb = time_embed(timesteps)"""
     text_embed_rkey: tp.ClassVar[str] = "text_embed"
     """encoder_hidden_states = text_embed(encoder_hidden_states)"""
+    text_norm_rkey: tp.ClassVar[str] = "text_embed"
+    """encoder_hidden_states = text_norm(encoder_hidden_states), share key with text_embed"""
     norm_in_rkey: tp.ClassVar[str] = "input_embed"
     """hidden_states = norm_in(hidden_states)"""
     proj_in_rkey: tp.ClassVar[str] = "input_embed"
@@ -1674,6 +1700,8 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
     input_embed: PatchEmbed
     time_embed: AdaLayerNormSingle | CombinedTimestepTextProjEmbeddings | TimestepEmbedding
     text_embed: PixArtAlphaTextProjection | nn.Linear
+    text_norm: nn.Module | None = None
+    """Optional text normalization layer (e.g., RMSNorm in QwenImage)"""
     norm_in: None = field(init=False, repr=False, default=None)
     proj_in: None = field(init=False, repr=False, default=None)
     norm_out: nn.LayerNorm | AdaLayerNormContinuous | None
@@ -1683,6 +1711,7 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
     input_embed_rname: str
     time_embed_rname: str
     text_embed_rname: str
+    text_norm_rname: str = ""
     norm_in_rname: str = field(init=False, repr=False, default="")
     proj_in_rname: str = field(init=False, repr=False, default="")
     norm_out_rname: str
@@ -1692,13 +1721,31 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
     input_embed_name: str = field(init=False, repr=False)
     time_embed_name: str = field(init=False, repr=False)
     text_embed_name: str = field(init=False, repr=False)
+    text_norm_name: str = field(init=False, repr=False, default="")
     # endregion
     # region absolute keys
     input_embed_key: str = field(init=False, repr=False)
     time_embed_key: str = field(init=False, repr=False)
     text_embed_key: str = field(init=False, repr=False)
+    text_norm_key: str = field(init=False, repr=False, default="")
     norm_out_key: str = field(init=False, repr=False)
     # endregion
+
+    @property
+    def config(self):
+        """Proxy to the underlying module's config."""
+        return self.module.config
+
+    def __getattr__(self, name: str):
+        """Proxy undefined attributes to the underlying module."""
+        # Avoid infinite recursion by checking if 'module' exists
+        if name == 'module':
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        # Try to get the attribute from the underlying module
+        try:
+            return getattr(self.module, name)
+        except AttributeError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     @property
     def num_blocks(self) -> int:
@@ -1715,7 +1762,7 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.pre_module_structs = {}
-        for fname in ("input_embed", "time_embed", "text_embed"):
+        for fname in ("input_embed", "time_embed", "text_embed", "text_norm"):
             module, rname, rkey = getattr(self, fname), getattr(self, f"{fname}_rname"), getattr(self, f"{fname}_rkey")
             setattr(self, f"{fname}_key", join_name(self.key, rkey, sep="_"))
             if module is not None or rname:
@@ -1738,7 +1785,10 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 )
 
     def get_prev_module_keys(self) -> tuple[str, ...]:
-        return tuple({self.input_embed_key, self.time_embed_key, self.text_embed_key})
+        keys = {self.input_embed_key, self.time_embed_key, self.text_embed_key}
+        if self.text_norm_key:
+            keys.add(self.text_norm_key)
+        return tuple(keys)
 
     def get_post_module_keys(self) -> tuple[str, ...]:
         return tuple({self.norm_out_key, self.proj_out_key})
@@ -1778,7 +1828,9 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
         idx: int = 0,
         **kwargs,
     ) -> "DiTStruct":
-        if isinstance(module, DIT_PIPELINE_CLS):
+        if isinstance(module, DIT_PIPELINE_CLS) or (
+            QWEN_IMAGE_EDIT_PIPELINE_CLS and isinstance(module, QWEN_IMAGE_EDIT_PIPELINE_CLS)
+        ):
             module = module.transformer
         if isinstance(module, FluxTransformer2DModel):
             return FluxStruct.construct(module, parent=parent, fname=fname, rname=rname, rkey=rkey, idx=idx, **kwargs)
@@ -1807,7 +1859,7 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 norm_out, norm_out_rname = module.norm_out, "norm_out"
                 proj_out, proj_out_rname = module.proj_out, "proj_out"
                 transformer_blocks, transformer_blocks_rname = module.transformer_blocks, "transformer_blocks"
-            elif QwenImageTransformer2DModel is not None and isinstance(module, QwenImageTransformer2DModel):
+            elif isinstance(module, QwenImageTransformer2DModel):
                 input_embed, input_embed_rname = module.img_in, "img_in"
                 time_embed, time_embed_rname = module.time_text_embed, "time_text_embed"
                 text_embed, text_embed_rname = module.txt_in, "txt_in"
@@ -1816,6 +1868,9 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 transformer_blocks, transformer_blocks_rname = module.transformer_blocks, "transformer_blocks"
             else:
                 raise NotImplementedError(f"Unsupported module type: {type(module)}")
+            # text_norm is optional, only QwenImage has it
+            text_norm = getattr(module, "txt_norm", None)
+            text_norm_rname = "txt_norm" if text_norm is not None else ""
             return DiTStruct(
                 module=module,
                 parent=parent,
@@ -1826,12 +1881,14 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 input_embed=input_embed,
                 time_embed=time_embed,
                 text_embed=text_embed,
+                text_norm=text_norm,
                 transformer_blocks=transformer_blocks,
                 norm_out=norm_out,
                 proj_out=proj_out,
                 input_embed_rname=input_embed_rname,
                 time_embed_rname=time_embed_rname,
                 text_embed_rname=text_embed_rname,
+                text_norm_rname=text_norm_rname,
                 norm_out_rname=norm_out_rname,
                 proj_out_rname=proj_out_rname,
                 transformer_blocks_rname=transformer_blocks_rname,
@@ -1856,6 +1913,7 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
         keys.add(cls.input_embed_rkey)
         keys.add(cls.time_embed_rkey)
         keys.add(cls.text_embed_rkey)
+        keys.add(cls.text_norm_rkey)
         keys.add(cls.norm_in_rkey)
         keys.add(cls.proj_in_rkey)
         keys.add(cls.norm_out_rkey)
@@ -1867,6 +1925,7 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
             key_map["embed"].add(cls.input_embed_rkey)
             key_map["embed"].add(cls.time_embed_rkey)
             key_map["embed"].add(cls.text_embed_rkey)
+            key_map["embed"].add(cls.text_norm_rkey)
             key_map["embed"].add(cls.norm_in_rkey)
             key_map["embed"].add(cls.proj_in_rkey)
             key_map["embed"].add(cls.norm_out_rkey)
@@ -2039,7 +2098,7 @@ class FluxStruct(DiTStruct):
         return {k: v for k, v in key_map.items() if v}
 
 
-DiffusionAttentionStruct.register_factory(Attention, DiffusionAttentionStruct._default_construct)
+DiffusionAttentionStruct.register_factory((Attention, FluxAttention), DiffusionAttentionStruct._default_construct)
 
 DiffusionFeedForwardStruct.register_factory(
     (FeedForward, FluxSingleTransformerBlock, GLUMBConv), DiffusionFeedForwardStruct._default_construct
@@ -2060,3 +2119,6 @@ DiTStruct.register_factory(tp.Union[DIT_PIPELINE_CLS, DIT_CLS], DiTStruct._defau
 DiffusionTransformerStruct.register_factory(Transformer2DModel, DiffusionTransformerStruct._default_construct)
 
 DiffusionModelStruct.register_factory(tp.Union[PIPELINE_CLS, MODEL_CLS], DiffusionModelStruct._default_construct)
+if QWEN_IMAGE_EDIT_PIPELINE_CLS:
+    DiTStruct.register_factory(QWEN_IMAGE_EDIT_PIPELINE_CLS, DiTStruct._default_construct)
+    DiffusionModelStruct.register_factory(QWEN_IMAGE_EDIT_PIPELINE_CLS, DiffusionModelStruct._default_construct)
