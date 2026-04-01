@@ -24,6 +24,7 @@ def compute_image_metrics(
     gt_stats_root: str = "",
     gt_metrics: tuple[str, ...] = ("clip_iqa", "clip_score", "image_reward", "fid"),
     ref_metrics: tuple[str, ...] = ("psnr", "lpips", "ssim", "fid"),
+    device: str = "cuda",
 ) -> dict:
     if chunk_start == 0 and chunk_step == 1:
         chunk_only = False
@@ -37,14 +38,20 @@ def compute_image_metrics(
     for benchmark in benchmarks:
         benchmark_results = {}
         dataset = get_dataset(benchmark, max_dataset_size=max_dataset_size, return_gt=True)
-        dirname = f"{dataset.config_name}-{dataset._unchunk_size}"
+        if benchmark.endswith((".yaml", ".yml")):
+            dataset_name = os.path.splitext(os.path.basename(benchmark))[0]
+            benchmark_dir = "YAML"
+            dirname = f"{dataset_name}-{dataset._unchunk_size}"
+        else:
+            benchmark_dir = benchmark
+            dirname = f"{dataset.config_name}-{dataset._unchunk_size}"
         if dataset._chunk_start == 0 and dataset._chunk_step == 1:
             filename = f"{dirname}.npz"
         else:
             filename = os.path.join(dirname, f"{dataset._chunk_start}-{dataset._chunk_step}.npz")
             if chunk_only:
                 dirname += f".{dataset._chunk_start}.{dataset._chunk_step}"
-        gen_dirpath = os.path.join(gen_root, "samples", benchmark, dirname)
+        gen_dirpath = os.path.join(gen_root, "samples", benchmark_dir, dirname)
         if gt_metrics:
             gt_results = compute_image_multimodal_metrics(dataset, gen_dirpath, metrics=gt_multimodal_metrics)
             if "image_reward" in gt_other_metrics:
@@ -61,14 +68,15 @@ def compute_image_metrics(
             benchmark_results["with_gt"] = gt_results
         if ref_root and ref_metrics:
             assert os.path.exists(ref_root), f"Reference root directory {ref_root} does not exist."
-            ref_dirpath = os.path.join(ref_root, "samples", benchmark, dirname)
-            ref_results = compute_image_similarity_metrics(ref_dirpath, gen_dirpath, metrics=ref_similarity_metrics)
+            ref_dirpath = os.path.join(ref_root, "samples", benchmark_dir, dirname)
+            ref_results = compute_image_similarity_metrics(ref_dirpath, gen_dirpath, metrics=ref_similarity_metrics, device=device)
             if "fid" in ref_other_metrics:
                 ref_results["fid"] = compute_fid(
                     ref_dirpath,
                     gen_dirpath,
-                    ref_cache_path=os.path.join(ref_root, "fid_stats", benchmark, filename),
-                    gen_cache_path=os.path.join(gen_root, "fid_stats", benchmark, filename),
+                    ref_cache_path=os.path.join(ref_root, "fid_stats", benchmark_dir, filename),
+                    gen_cache_path=os.path.join(gen_root, "fid_stats", benchmark_dir, filename),
+                    device=device,
                 )
             benchmark_results["with_orig"] = ref_results
         print(f"{dirname} results:")

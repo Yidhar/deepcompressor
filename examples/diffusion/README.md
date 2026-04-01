@@ -63,7 +63,6 @@ In this command,
 - The default evaluation datasets are [1024](configs/__default__.yaml#14) samples from [MJHQ](configs/__default__.yaml#33) and [DCI](configs/__default__.yaml#34).
 - If you would like to save quantized model checkpoint, please add `--save-model true` or `--save-model /PATH/TO/CHECKPOINT/DIR` in the command.
 
-
 ## Deployment
 
 If you save the SVDQuant W4A4 quantized model checkpoint, you can easily to deploy quantized model with [`Nunchaku`](https://github.com/mit-han-lab/nunchaku) engine.
@@ -148,4 +147,3 @@ If you find `deepcompressor` useful or relevant to your research, please kindly 
   year={2025}
 }
 ```
-

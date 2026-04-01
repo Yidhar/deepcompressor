@@ -56,7 +56,7 @@ def center_crop_and_resize(image: Image.Image, target_size: int | tuple[int, int
         left = round((width - new_width) / 2)
         right = round(left + new_width)
         image = image.crop((left, 0, right, height))
-    elif width / height < width / height:
+    elif width / height < target_width / target_height:
         new_height = width * target_height / target_width
         top = round((height - new_height) / 2)
         bottom = round(top + new_height)
@@ -150,5 +150,13 @@ def get_control(  # noqa: C901
         if isinstance(images, Image.Image):
             return control_images[0], mask_images[0]
         return control_images, mask_images
+    elif task == "image-edit":
+        control_images = []
+        for image in image_batch:
+            image = center_crop_and_resize(image, size)
+            control_images.append(image.convert("RGB"))
+        if isinstance(images, Image.Image):
+            return control_images[0]
+        return control_images
     else:
         raise ValueError(f"Unsupported task: {task}")

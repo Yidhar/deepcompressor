@@ -167,9 +167,14 @@ cython_debug/
 *.log
 *.pt
 .tmp/
-runs
-exps
+
+# Local datasets / experiment artifacts
+datasets/
+exports/
+references/
 runs/
 exps/
-wandb
 wandb/
+
+# Local benchmark inputs that should stay out of the publishable repo
+examples/diffusion/assets/qwen-image-edit-search/

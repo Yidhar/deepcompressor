@@ -17,6 +17,7 @@ from ..quantizer.impl.info import QuantInfo
 from ..quantizer.processor import Quantizer
 from ..utils import math, tools
 from .config import DynamicRangeCalibConfig, SearchBasedCalibGranularity
+from .distributed import DistributedCalibContext
 from .search import SearchBasedCalibrator
 
 __all__ = ["DynamicRangeCalibrator", "calibrate_dynamic_range"]
@@ -32,6 +33,7 @@ class DynamicRangeCalibrator(SearchBasedCalibrator[DynamicRangeCalibConfig, Dyna
         static: bool,
         quantizer: Quantizer,
         pre_scale: torch.Tensor | None = None,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> None:
         """Initialize the calibrator.
 
@@ -46,6 +48,8 @@ class DynamicRangeCalibrator(SearchBasedCalibrator[DynamicRangeCalibConfig, Dyna
                 The quantizer.
             pre_scale (`torch.Tensor` or `None`):
                 The joint scale tensor of the previous quantization steps.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
         """
         super().__init__(
             tensor_type=tensor_type,
@@ -54,6 +58,7 @@ class DynamicRangeCalibrator(SearchBasedCalibrator[DynamicRangeCalibConfig, Dyna
             x_quantizer=quantizer if tensor_type == TensorType.Inputs else None,
             y_quantizer=quantizer if tensor_type == TensorType.Outputs else None,
             develop_dtype=quantizer.develop_dtype,
+            dist_ctx=dist_ctx,
         )
         assert self.needs_quant, "The tensor should be quantized."
         self.static = static
@@ -313,6 +318,7 @@ def calibrate_dynamic_range(
     orig_weights: tp.Sequence[tuple[nn.Parameter, torch.Tensor]] | None = None,
     orig_activations: TensorsCache | None = None,
     orig_eval_inputs: TensorsCache | None = None,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> tp.Sequence[DynamicRange] | None:
     """Calibrate the dynamic range.
 
@@ -392,6 +398,7 @@ def calibrate_dynamic_range(
             config=config,
             static=static,
             quantizer=quantizer,
+            dist_ctx=dist_ctx,
         ).calibrate(
             x_wgts=x_wgts,
             y_wgts=y_wgts,
@@ -448,6 +455,7 @@ def calibrate_dynamic_range(
             static=static,
             quantizer=step_quantizer,
             pre_scale=quant_scale.data,
+            dist_ctx=dist_ctx,
         ).calibrate(
             x_wgts=x_wgts,
             y_wgts=y_wgts,

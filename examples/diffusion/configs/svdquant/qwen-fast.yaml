@@ -1,0 +1,45 @@
+# Fast overlay for QwenImage quantization flow validation.
+# NOT for production quality -- use default settings on GPU cluster for that.
+quant:
+  calib:
+    num_samples: 32
+    num_workers: 0
+  develop_dtype: torch.bfloat16
+  smooth:
+    proj:
+      strategy: Manual
+      alpha: 0.5
+      beta: -1
+      sample_batch_size: 32
+      sample_size: 32
+      outputs_device: cuda
+      skips:
+      - embed
+      - resblock
+      - transformer_proj_in
+      - transformer_proj_out
+      - transformer_norm
+      - transformer_add_norm
+      - transformer_mod
+      - down_sample
+      - up_sample
+  wgts:
+    calib_range:
+      num_grids: 10
+      sample_batch_size: 32
+      sample_size: 32
+    low_rank:
+      num_iters: 5
+      sample_batch_size: 32
+      sample_size: 32
+      outputs_device: cuda
+      skips:
+      - embed
+      - resblock
+      - transformer_proj_in
+      - transformer_proj_out
+      - transformer_norm
+      - transformer_add_norm
+      - transformer_mod
+      - down_sample
+      - up_sample

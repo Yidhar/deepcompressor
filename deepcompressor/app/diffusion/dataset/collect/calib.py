@@ -54,7 +54,7 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
 
         task = config.pipeline.task
         control_root = config.eval.control_root
-        if task in ["canny-to-image", "depth-to-image", "inpainting"]:
+        if task in ["canny-to-image", "depth-to-image", "inpainting", "image-edit"]:
             controls = get_control(
                 task,
                 batch["image"],
@@ -66,10 +66,12 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
             if task == "inpainting":
                 pipeline_kwargs["image"] = controls[0]
                 pipeline_kwargs["mask_image"] = controls[1]
+            elif task == "image-edit":
+                pipeline_kwargs["image"] = controls
             else:
                 pipeline_kwargs["control_image"] = controls
 
-        result_images = pipeline(prompts, generator=generators, **pipeline_kwargs).images
+        result_images = pipeline(prompt=prompts, generator=generators, **pipeline_kwargs).images
         num_guidances = (len(caches) // batch_size) // config.eval.num_steps
         num_steps = len(caches) // (batch_size * num_guidances)
         assert (
@@ -136,7 +138,7 @@ if __name__ == "__main__":
     dataset = get_dataset(
         collect_config.data_path,
         max_dataset_size=collect_config.num_samples,
-        return_gt=ptq_config.pipeline.task in ["canny-to-image"],
+        return_gt=ptq_config.pipeline.task in ["canny-to-image", "depth-to-image", "inpainting", "image-edit"],
         repeat=1,
     )
 

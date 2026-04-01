@@ -13,6 +13,11 @@ from diffusers.models.transformers import (
 )
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 
+try:
+    from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel
+except ImportError:
+    QwenImageTransformer2DModel = None
+
 from deepcompressor.utils.common import tree_map, tree_split
 
 __all__ = ["CollectHook"]
@@ -58,6 +63,8 @@ class CollectHook:
             new_args.append(input_kwargs.pop("hidden_states"))
         elif isinstance(module, FluxTransformer2DModel):
             new_args.append(input_kwargs.pop("hidden_states"))
+        elif QwenImageTransformer2DModel is not None and isinstance(module, QwenImageTransformer2DModel):
+            new_args.append(input_kwargs.pop("hidden_states"))
         else:
             raise ValueError(f"Unknown model: {module}")
         cache = tree_map(lambda x: x.cpu(), {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})
@@ -72,5 +79,18 @@ class CollectHook:
                 if encoder_attention_mask is not None:
                     encoder_hidden_states = encoder_hidden_states[:, : max(encoder_attention_mask.sum(), 1)]
                 cache_kwargs["encoder_hidden_states"] = encoder_hidden_states
+
+        if QwenImageTransformer2DModel is not None and isinstance(module, QwenImageTransformer2DModel) and self.zero_redundancy:
+            for cache in split_cache:
+                cache_kwargs = cache["input_kwargs"]
+                encoder_hidden_states = cache_kwargs.get("encoder_hidden_states")
+                if encoder_hidden_states is None:
+                    continue
+                assert encoder_hidden_states.shape[0] == 1
+                mask = cache_kwargs.get("encoder_hidden_states_mask", None)
+                if mask is not None:
+                    valid_len = max(int(mask.sum().item()), 1)
+                    cache_kwargs["encoder_hidden_states"] = encoder_hidden_states[:, :valid_len]
+                    cache_kwargs["encoder_hidden_states_mask"] = mask[..., :valid_len]
 
         self.caches.extend(split_cache)

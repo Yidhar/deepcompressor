@@ -17,6 +17,12 @@ from omniconfig import configclass
 from torch import nn
 from transformers import PreTrainedModel, PreTrainedTokenizer, T5EncoderModel
 
+try:
+    from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+except ImportError:
+    QwenImageEditPipeline = None
+    QwenImageEditPlusPipeline = None
+
 from deepcompressor.data.utils.dtype import eval_dtype
 from deepcompressor.quantizer.processor import Quantizer
 from deepcompressor.utils import tools
@@ -29,8 +35,20 @@ from ..nn.patch import (
     replace_up_block_conv_with_concat_conv,
     shift_input_activations,
 )
+from ..qwenimage import QwenImagePipelineWithSeqLen as QwenImagePipeline
 
 __all__ = ["DiffusionPipelineConfig"]
+
+
+def _is_qwen_image_name(name: str) -> bool:
+    return name in ("qwenimage", "qwen-image")
+
+
+def _get_qwen_image_edit_suffix(name: str) -> str | None:
+    for prefix in ("qwenimage-edit", "qwen-image-edit"):
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+    return None
 
 
 @configclass
@@ -101,6 +119,8 @@ class DiffusionPipelineConfig:
             self.task = "depth-to-image"
         elif self.name == "flux.1-fill-dev":
             self.task = "inpainting"
+        elif _get_qwen_image_edit_suffix(self.name) is not None:
+            self.task = "image-edit"
 
     def build(
         self, *, dtype: str | torch.dtype | None = None, device: str | torch.device | None = None
@@ -344,6 +364,10 @@ class DiffusionPipelineConfig:
                 path = "black-forest-labs/FLUX.1-Fill-dev"
             elif name == "flux.1-schnell":
                 path = "black-forest-labs/FLUX.1-schnell"
+            elif _is_qwen_image_name(name):
+                path = "Qwen/Qwen-Image"
+            elif (edit_suffix := _get_qwen_image_edit_suffix(name)) is not None:
+                path = f"Qwen/Qwen-Image-Edit{edit_suffix}"
             else:
                 raise ValueError(f"Path for {name} is not specified.")
         if name in ["flux.1-canny-dev", "flux.1-depth-dev"]:
@@ -357,6 +381,17 @@ class DiffusionPipelineConfig:
                 pipeline.text_encoder.to(dtype)
             else:
                 pipeline = SanaPipeline.from_pretrained(path, torch_dtype=dtype)
+        elif _is_qwen_image_name(name):
+            pipeline = QwenImagePipeline.from_pretrained(path, torch_dtype=dtype)
+        elif (edit_suffix := _get_qwen_image_edit_suffix(name)) is not None:
+            if edit_suffix:
+                if QwenImageEditPlusPipeline is None:
+                    raise ImportError("QwenImageEditPlusPipeline requires diffusers>=0.36.0.")
+                pipeline = QwenImageEditPlusPipeline.from_pretrained(path, torch_dtype=dtype)
+            else:
+                if QwenImageEditPipeline is None:
+                    raise ImportError("QwenImageEditPipeline is not available in the installed diffusers version.")
+                pipeline = QwenImageEditPipeline.from_pretrained(path, torch_dtype=dtype)
         else:
             pipeline = AutoPipelineForText2Image.from_pretrained(path, torch_dtype=dtype)
         pipeline = pipeline.to(device)

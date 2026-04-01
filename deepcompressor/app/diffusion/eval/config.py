@@ -77,6 +77,9 @@ class DiffusionEvalConfig:
     clean_caption: bool | None = None
     num_steps: int | None = None
     guidance_scale: float | None = None
+    true_cfg_scale: float | None = None
+    negative_prompt: str | None = None
+    max_sequence_length: int | None = None
     num_samples: int = 1024
 
     benchmarks: list[str] = field(
@@ -102,7 +105,11 @@ class DiffusionEvalConfig:
 
     def __post_init__(self):
         assert self.protocol
-        self.protocol = self.protocol.lower().format(num_steps=self.num_steps, guidance_scale=self.guidance_scale)
+        self.protocol = self.protocol.lower().format(
+            num_steps=self.num_steps,
+            guidance_scale=self.guidance_scale,
+            true_cfg_scale=self.true_cfg_scale,
+        )
         assert 0 <= self.chunk_start < self.chunk_step
         if self.chunk_start == 0 and self.chunk_step == 1:
             self.chunk_only = False
@@ -119,6 +126,12 @@ class DiffusionEvalConfig:
             kwargs["num_inference_steps"] = self.num_steps
         if self.guidance_scale is not None:
             kwargs["guidance_scale"] = self.guidance_scale
+        if self.true_cfg_scale is not None:
+            kwargs["true_cfg_scale"] = self.true_cfg_scale
+        if self.negative_prompt is not None:
+            kwargs["negative_prompt"] = self.negative_prompt
+        if self.max_sequence_length is not None:
+            kwargs["max_sequence_length"] = self.max_sequence_length
         return kwargs
 
     def _generate(
@@ -169,20 +182,23 @@ class DiffusionEvalConfig:
 
             pipeline_kwargs = self.get_pipeline_kwargs()
 
-            if task in ["canny-to-image", "depth-to-image", "inpainting"]:
+            if task in ["canny-to-image", "depth-to-image", "inpainting", "image-edit"]:
+                images = batch["image"][rank :: self.num_gpus]
                 controls = get_control(
                     task,
-                    batch["image"],
-                    names=batch["filename"],
+                    images,
+                    names=filenames,
                     data_root=os.path.join(control_root, f"{dataset_name}-{dataset._unchunk_size}"),
                 )
                 if task == "inpainting":
                     pipeline_kwargs["image"] = controls[0]
                     pipeline_kwargs["mask_image"] = controls[1]
+                elif task == "image-edit":
+                    pipeline_kwargs["image"] = controls
                 else:
                     pipeline_kwargs["control_image"] = controls
 
-            output = pipeline(prompts, generator=generators, **pipeline_kwargs)
+            output = pipeline(prompt=prompts, generator=generators, **pipeline_kwargs)
             images = output.images
             for filename, image in zip(filenames, images, strict=True):
                 image.save(os.path.join(dirpath, f"{filename}.png"))
@@ -196,13 +212,14 @@ class DiffusionEvalConfig:
         logger = logging.getLogger(f"{__name__}.DiffusionEval")
         gen_root = gen_root or self.gen_root
         for benchmark in self.benchmarks:
+            repeat = 4 if benchmark.endswith((".yaml", ".yml")) else 1
             dataset = get_dataset(
                 benchmark,
                 max_dataset_size=self.num_samples,
                 chunk_start=self.chunk_start,
                 chunk_step=self.chunk_step,
-                return_gt=task in ["canny-to-image"],
-                repeat=1,
+                return_gt=task in ["canny-to-image", "depth-to-image", "inpainting", "image-edit"],
+                repeat=repeat,
             )
             if benchmark.endswith(".yaml") or benchmark.endswith(".yml"):
                 dataset_name = os.path.splitext(os.path.basename(benchmark))[0]

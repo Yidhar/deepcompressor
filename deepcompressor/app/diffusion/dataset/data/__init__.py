@@ -9,20 +9,38 @@ __all__ = ["get_dataset"]
 
 def load_dataset_yaml(meta_path: str, max_dataset_size: int = -1, repeat: int = 4) -> dict:
     meta = yaml.safe_load(open(meta_path, "r"))
+    meta_dir = os.path.dirname(os.path.abspath(meta_path))
     names = list(meta.keys())
     if max_dataset_size > 0:
         random.Random(0).shuffle(names)
         names = names[:max_dataset_size]
         names = sorted(names)
 
+    has_images = any(isinstance(meta[name], dict) for name in names)
     ret = {"filename": [], "prompt": [], "meta_path": []}
+    if has_images:
+        ret["image"] = []
+        ret["image_path"] = []
     idx = 0
     for name in names:
-        prompt = meta[name]
+        entry = meta[name]
+        if isinstance(entry, str):
+            prompt = entry
+            image_path = None
+        else:
+            prompt = entry["prompt"]
+            image_path = entry.get("image_path", entry.get("image"))
+            if image_path is None:
+                raise ValueError(f"YAML entry '{name}' is missing 'image' or 'image_path'.")
+            if "://" not in image_path and not os.path.isabs(image_path):
+                image_path = os.path.join(meta_dir, image_path)
         for j in range(repeat):
             ret["filename"].append(f"{name}-{j}")
             ret["prompt"].append(prompt)
             ret["meta_path"].append(meta_path)
+            if has_images:
+                ret["image"].append(image_path)
+                ret["image_path"].append(image_path)
             idx += 1
     return ret
 
@@ -46,15 +64,18 @@ def get_dataset(
         "max_dataset_size": max_dataset_size,
     }
     if name.endswith((".yaml", ".yml")):
+        yaml_data = load_dataset_yaml(name, max_dataset_size=max_dataset_size, repeat=repeat)
+        features = {
+            "filename": datasets.Value("string"),
+            "prompt": datasets.Value("string"),
+            "meta_path": datasets.Value("string"),
+        }
+        if "image" in yaml_data:
+            features["image"] = datasets.Image()
+            features["image_path"] = datasets.Value("string")
         dataset = datasets.Dataset.from_dict(
-            load_dataset_yaml(name, max_dataset_size=max_dataset_size, repeat=repeat),
-            features=datasets.Features(
-                {
-                    "filename": datasets.Value("string"),
-                    "prompt": datasets.Value("string"),
-                    "meta_path": datasets.Value("string"),
-                }
-            ),
+            yaml_data,
+            features=datasets.Features(features),
         )
     else:
         path = os.path.join(prefix, f"{name}")

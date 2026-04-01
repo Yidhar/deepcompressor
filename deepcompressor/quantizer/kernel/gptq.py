@@ -166,31 +166,37 @@ def gptq_quantize(  # noqa: C901
             The quantized tensor in the shape of ``view_shape``.
     """
     view_tensor = tensor.view(view_shape)
+    compute_dtype = torch.float32 if view_tensor.dtype in (torch.float16, torch.bfloat16) else view_tensor.dtype
     view_shape = view_tensor.shape  # remove any -1 in the view_shape
     # region step 1: reshape the tensor to (#g0 * gs0, #g1 * #g2 * ... * gs1 * gs2, ...)
     len_view_shape = len(view_shape)
     # view_tensor: (#g0, gs0, #g1, gs1, #g2, gs2, ...) -> (#g0, gs0, #g1, #g2, ..., gs1, gs2, ...)
     reshaped_tensor = view_tensor.permute(0, 1, *range(2, len_view_shape, 2), *range(3, len_view_shape, 2))
     # reshaped_tensor: (#g0 * gs0, #g1 * #g2 * ... * gs1 * gs2 * ...)
-    reshaped_tensor = reshaped_tensor.reshape(view_shape[0] * view_shape[1], -1)
+    reshaped_tensor = reshaped_tensor.reshape(view_shape[0] * view_shape[1], -1).to(dtype=compute_dtype)
     num_row_groups, num_column_groups = view_shape[0], view_shape[2::2].numel()
     row_group_size, column_group_size = view_shape[1], view_shape[3::2].numel()
     num_rows, num_columns = reshaped_tensor.shape
-    reshaped_scale = scale.view(num_row_groups, 1, num_column_groups)
+    reshaped_scale = scale.view(num_row_groups, 1, num_column_groups).to(device=view_tensor.device, dtype=compute_dtype)
     zero_is_number = isinstance(zero, (int, float)) or zero.numel() == 1
-    reshaped_zero = zero if zero_is_number else zero.view(num_row_groups, 1, num_column_groups)
+    if zero_is_number:
+        reshaped_zero = zero
+        if isinstance(reshaped_zero, torch.Tensor):
+            reshaped_zero = reshaped_zero.to(device=view_tensor.device, dtype=compute_dtype)
+    else:
+        reshaped_zero = zero.view(num_row_groups, 1, num_column_groups).to(device=view_tensor.device, dtype=compute_dtype)
     # endregion
     # region step 2: get Hessian matrix
-    hessian = torch.zeros((num_columns, num_columns), device=view_tensor.device, dtype=view_tensor.dtype)
+    hessian = torch.zeros((num_columns, num_columns), device=view_tensor.device, dtype=compute_dtype)
     for x in inputs.data:
         x: torch.Tensor = inputs.reshape(x.view(-1, *x.shape[inputs.channels_dim :]))
         if gptq_config.hessian_block_size > 0 and x.shape[0] > gptq_config.hessian_block_size:
             for b in range(0, x.shape[0], gptq_config.hessian_block_size):
                 _x = x[b : min(b + gptq_config.hessian_block_size, x.shape[0])]
-                _x = math.sqrt(2 / inputs.num_samples) * _x.to(device=view_tensor.device, dtype=view_tensor.dtype)
+                _x = math.sqrt(2 / inputs.num_samples) * _x.to(device=view_tensor.device, dtype=compute_dtype)
                 hessian += torch.matmul(_x.t(), _x)
         else:
-            x = math.sqrt(2 / inputs.num_samples) * x.to(device=view_tensor.device, dtype=view_tensor.dtype)
+            x = math.sqrt(2 / inputs.num_samples) * x.to(device=view_tensor.device, dtype=compute_dtype)
             hessian += torch.matmul(x.t(), x)
     dead = hessian.diagonal() == 0
     hessian[dead, dead] = 1
@@ -214,6 +220,7 @@ def gptq_quantize(  # noqa: C901
     # endregion
     # region step 5: get the inverse of the Hessian matrix
     stable_inv, num_inv_tries = False, 0
+    hessian_inv = None
     while (not stable_inv) and num_inv_tries < gptq_config.num_inv_tries:
         num_inv_tries += 1
         try:
@@ -224,9 +231,17 @@ def gptq_quantize(  # noqa: C901
             hessian_diag += (gptq_config.damp_percentage * 0.1) * hessian_diag_mean
             continue
         stable_inv = True
+    logger = tools.logging.getLogger(f"{__name__}.GPTQ")
     if num_inv_tries > 1:
-        logger = tools.logging.getLogger(f"{__name__}.GPTQ")
         logger.debug("        - Hessian is not stable %s %d tries.", "until" if stable_inv else "after", num_inv_tries)
+    if hessian_inv is None:
+        logger.warning("        - GPTQ Hessian inverse failed after %d tries, falling back to RTN.", gptq_config.num_inv_tries)
+        del hessian, hessian_diag, hessian_diag_mean, num_inv_tries
+        from .rtn import rtn_quantize
+        return rtn_quantize(
+            tensor=tensor, view_shape=view_shape, scale=scale, zero=zero,
+            quant_dtype=quant_dtype, zero_domain=zero_domain,
+        )
     assert not hessian_inv.isinf().any(), "Inverse of Hessian matrix contains Inf."
     assert not hessian_inv.isnan().any(), "Inverse of Hessian matrix contains NaN."
     del hessian, hessian_diag, hessian_diag_mean, num_inv_tries
@@ -282,4 +297,4 @@ def gptq_quantize(  # noqa: C901
     # endregion
     assert not qtensor.isnan().any(), "GPTQ Quantized tensor contains NaN."
     assert not qtensor.isinf().any(), "GPTQ Quantized tensor contains Inf."
-    return qtensor
+    return qtensor.to(dtype=view_tensor.dtype)

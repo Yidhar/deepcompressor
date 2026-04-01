@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from deepcompressor.csrc.load import _C
+from deepcompressor.csrc.load import get_extension
 
 __all__ = ["Codebook"]
 
@@ -47,7 +47,7 @@ class Codebook:
         """
         dtype = tensor.dtype
         tensor = tensor.to(self.values.dtype).contiguous()
-        return _C.round_to_nearest_in_codebook_cuda(tensor, self.values).to(dtype=dtype)
+        return get_extension().round_to_nearest_in_codebook_cuda(tensor, self.values).to(dtype=dtype)
 
     def to(self, *, device: torch.device | None = None, dtype: torch.dtype | None = None) -> "Codebook":
         """Move the codebook to the specified device and dtype.
@@ -79,7 +79,7 @@ class Codebook:
         device: torch.device | str = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> "Codebook":
-        """Create a map of values to a code of `code_bits` bits.
+        """Create a codebook from a list of (value, code) maps.
 
         Args:
             maps (`list[tuple[float, int]]`):
@@ -97,7 +97,7 @@ class Codebook:
         """
         if bits > 8:
             raise NotImplementedError("Codebook with more than 8 bits is not supported")
-        assert len(maps) <= 2**bits, "Too many (value, code) maps for the code bits"
+        assert len(maps) <= 2**bits, f"Codebook size {len(maps)} is larger than {2**bits} for {bits} bits"
         size = len(maps)
         maps.sort(key=lambda x: x[0])
         values = torch.tensor([v[0] for v in maps], device=device, dtype=dtype)

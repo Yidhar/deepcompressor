@@ -15,6 +15,7 @@ from ..utils import math, tools
 from ..utils.common import split_sequence
 from ..utils.hooks import BaseInputPackager, BaseOutputPackager, BaseTensorProcessor
 from .config import SearchBasedCalibObjective, SmoothCalibConfig, SmoothSpanMode
+from .distributed import DistributedCalibContext
 from .metric import ChannelMetric
 from .search import SearchBasedCalibrator
 
@@ -160,6 +161,7 @@ class SmoothCalibrator(SearchBasedCalibrator[SmoothCalibConfig, torch.Tensor]):
         num_head_repeats: int = 1,
         with_rope: bool = False,
         develop_dtype: torch.dtype = torch.float32,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> None:
         """Initialize the calibrator.
 
@@ -182,6 +184,8 @@ class SmoothCalibrator(SearchBasedCalibrator[SmoothCalibConfig, torch.Tensor]):
                 Whether rotary position embedding is used for y-x computation.
             develop_dtype (torch.dtype, *optional*, defaults to ``torch.float32``):
                 The development data type.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
         """
         assert tensor_type in (TensorType.Weights, TensorType.Outputs)
         super().__init__(
@@ -191,6 +195,7 @@ class SmoothCalibrator(SearchBasedCalibrator[SmoothCalibConfig, torch.Tensor]):
             x_quantizer=x_quantizer,
             y_quantizer=y_quantizer,
             develop_dtype=develop_dtype,
+            dist_ctx=dist_ctx,
         )
         self.num_heads = num_heads
         self.num_head_repeats = num_head_repeats
@@ -725,6 +730,7 @@ class SmoothLinearCalibrator(SmoothCalibrator):
         num_heads: int = 1,
         num_head_repeats: int = 1,
         develop_dtype: torch.dtype = torch.float32,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> None:
         """Initialize the calibrator.
 
@@ -741,6 +747,8 @@ class SmoothLinearCalibrator(SmoothCalibrator):
                 The number of head repeats.
             develop_dtype (`torch.dtype`, *optional*, defaults to `torch.float32`):
                 The development data type.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
         """
         super().__init__(
             tensor_type=TensorType.Weights,
@@ -751,6 +759,7 @@ class SmoothLinearCalibrator(SmoothCalibrator):
             num_heads=num_heads,
             num_head_repeats=num_head_repeats,
             develop_dtype=develop_dtype,
+            dist_ctx=dist_ctx,
         )
 
 
@@ -935,6 +944,7 @@ def smooth_linear_modules(
     splits: list[int] | None = None,
     extra_modules: list[nn.Linear] | None = None,
     develop_dtype: torch.dtype = torch.float32,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> torch.Tensor:
     """Smooth two consecutive modules.
 
@@ -986,6 +996,7 @@ def smooth_linear_modules(
             num_heads=num_heads,
             num_head_repeats=num_head_repeats,
             develop_dtype=develop_dtype,
+            dist_ctx=dist_ctx,
         ).calibrate(
             x_wgts=[module.weight for module in modules] if weights is None else weights,
             x_acts=inputs,

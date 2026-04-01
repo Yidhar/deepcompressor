@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from deepcompressor.calib.config import SkipBasedQuantLowRankCalibConfig
+from deepcompressor.calib.distributed import DistributedCalibContext
 from deepcompressor.calib.lowrank import LowRankBranch, QuantLowRankCalibrator
 from deepcompressor.calib.range import calibrate_dynamic_range
 from deepcompressor.data.cache import TensorsCache
@@ -85,6 +86,7 @@ class DiffusionQuantizer(Quantizer):
         orig_weights: tp.Sequence[tuple[nn.Parameter, torch.Tensor]] | None = None,
         orig_activations: TensorsCache | None = None,
         orig_eval_inputs: TensorsCache | None = None,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> tp.Sequence[DynamicRange] | None:
         """Calibrate the dynamic range.
 
@@ -110,6 +112,8 @@ class DiffusionQuantizer(Quantizer):
                 The original activations.
             orig_eval_inputs (`TensorsCache` or `None`, *optional*, defaults to `None`):
                 The original evaluation inputs.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
 
         Returns:
             `Sequence[DynamicRange]` or `None`:
@@ -136,6 +140,7 @@ class DiffusionQuantizer(Quantizer):
                 orig_weights=orig_weights,
                 orig_activations=orig_activations,
                 orig_eval_inputs=orig_eval_inputs,
+                dist_ctx=dist_ctx,
             )
         return self.dynamic_range
 
@@ -192,6 +197,7 @@ class DiffusionWeightQuantizer(DiffusionQuantizer):
         eval_kwargs: dict[str, tp.Any] | None = None,
         orig_inputs: TensorsCache | None = None,
         orig_eval_inputs: TensorsCache | None = None,
+        dist_ctx: DistributedCalibContext | None = None,
     ) -> tp.Sequence[DynamicRange] | None:
         """Calibrate the dynamic range.
 
@@ -215,6 +221,8 @@ class DiffusionWeightQuantizer(DiffusionQuantizer):
                 The original inputs.
             orig_eval_inputs (`TensorsCache` or `None`, *optional*, defaults to `None`):
                 The original evaluation inputs.
+            dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+                Distributed calibration context for sample-parallel calibration.
 
         Returns:
             `Sequence[DynamicRange]` or `None`:
@@ -229,6 +237,7 @@ class DiffusionWeightQuantizer(DiffusionQuantizer):
             eval_kwargs=eval_kwargs,
             orig_activations=orig_inputs,
             orig_eval_inputs=orig_eval_inputs,
+            dist_ctx=dist_ctx,
         )
 
     def calibrate_low_rank(

@@ -11,19 +11,16 @@ import torch.nn as nn
 import torch.utils.data
 from diffusers.models.attention import JointTransformerBlock
 from diffusers.models.attention_processor import Attention
-from diffusers.models.transformers.transformer_flux import (
-    FluxSingleTransformerBlock,
-    FluxTransformerBlock,
-)
+from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
+
+try:
+    from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+except ImportError:
+    QwenImageTransformerBlock = None
 from omniconfig import configclass
 
-from deepcompressor.data.cache import (
-    IOTensorsCache,
-    ModuleForwardInput,
-    TensorCache,
-    TensorsCache,
-)
-from deepcompressor.data.utils.reshape import AttentionInputReshapeFn, LinearReshapeFn
+from deepcompressor.data.cache import IOTensorsCache, ModuleForwardInput, TensorCache, TensorsCache
+from deepcompressor.data.utils.reshape import AttnInputReshapeFn, LinearInputReshapeFn
 from deepcompressor.dataset.action import CacheAction, ConcatCacheAction
 from deepcompressor.dataset.cache import BaseCalibCacheLoader
 from deepcompressor.dataset.config import BaseDataLoaderConfig
@@ -76,7 +73,50 @@ class DiffusionCalibDataset(DiffusionDataset):
         super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
         data = [torch.load(path) for path in self.filepaths]
         random.Random(seed).shuffle(data)
+        self._pad_encoder_hidden_states(data)
         self.data = data
+
+    @staticmethod
+    def _pad_encoder_hidden_states(data: list[dict[str, tp.Any]]) -> None:
+        """Pad encoder_hidden_states and mask to dataset-global uniform length.
+
+        Handles both PixArt-style (encoder_attention_mask) and QwenImage-style
+        (encoder_hidden_states_mask). For each mask key present in the data:
+        1. Find the global max sequence length across all samples
+        2. Pad encoder_hidden_states to that length (zero-fill)
+        3. Pad the mask itself to that length (False/0-fill)
+        This ensures tree_collate works correctly at any batch_size.
+        """
+        for mask_key in ("encoder_attention_mask", "encoder_hidden_states_mask"):
+            samples_with_hidden_states = [
+                d
+                for d in data
+                if mask_key in d.get("input_kwargs", {})
+                and d["input_kwargs"].get("encoder_hidden_states") is not None
+            ]
+            if not samples_with_hidden_states:
+                continue
+            # Find dataset-global max length from encoder hidden states.
+            target_len = max(d["input_kwargs"]["encoder_hidden_states"].shape[1] for d in samples_with_hidden_states)
+            for d in samples_with_hidden_states:
+                kwargs = d["input_kwargs"]
+                ehs = kwargs.get("encoder_hidden_states")
+                assert ehs is not None
+                mask = kwargs.get(mask_key)
+                if mask is None:
+                    mask = torch.ones(ehs.shape[:2], dtype=torch.bool)
+                    kwargs[mask_key] = mask
+                mask_len = mask.shape[-1]
+                # Pad encoder_hidden_states to target_len
+                if ehs.shape[1] < target_len:
+                    kwargs["encoder_hidden_states"] = torch.nn.functional.pad(
+                        ehs, (0, 0, 0, target_len - ehs.shape[1])
+                    )
+                # Pad mask to target_len (False/0 for padding positions)
+                if mask_len < target_len:
+                    kwargs[mask_key] = torch.nn.functional.pad(
+                        mask, (0, target_len - mask_len)
+                    )
 
     def __len__(self) -> int:
         return len(self.data)
@@ -116,9 +156,9 @@ class DiffusionConcatCacheAction(ConcatCacheAction):
                 if encoder_hidden_states_cache.channels_dim is None:
                     encoder_hidden_states_cache.channels_dim = encoder_channels_dim
                     if encoder_channels_dim == -1:
-                        encoder_hidden_states_cache.reshape = LinearReshapeFn()
+                        encoder_hidden_states_cache.reshape = LinearInputReshapeFn()
                     else:
-                        encoder_hidden_states_cache.reshape = AttentionInputReshapeFn(encoder_channels_dim)
+                        encoder_hidden_states_cache.reshape = AttnInputReshapeFn(encoder_channels_dim)
                 else:
                     assert encoder_hidden_states_cache.channels_dim == encoder_channels_dim
             hidden_states, hidden_states_cache = tensors["hidden_states"], cache.tensors["hidden_states"]
@@ -126,9 +166,9 @@ class DiffusionConcatCacheAction(ConcatCacheAction):
             if hidden_states_cache.channels_dim is None:
                 hidden_states_cache.channels_dim = channels_dim
                 if channels_dim == -1:
-                    hidden_states_cache.reshape = LinearReshapeFn()
+                    hidden_states_cache.reshape = LinearInputReshapeFn()
                 else:
-                    hidden_states_cache.reshape = AttentionInputReshapeFn(channels_dim)
+                    hidden_states_cache.reshape = AttnInputReshapeFn(channels_dim)
             else:
                 assert hidden_states_cache.channels_dim == channels_dim
         return super().info(name, module, tensors, cache)
@@ -166,11 +206,11 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             return IOTensorsCache(
                 inputs=TensorsCache(
                     OrderedDict(
-                        hidden_states=TensorCache(channels_dim=-1, reshape=LinearReshapeFn()),
-                        temb=TensorCache(channels_dim=1, reshape=LinearReshapeFn()),
+                        hidden_states=TensorCache(channels_dim=-1, reshape=LinearInputReshapeFn()),
+                        temb=TensorCache(channels_dim=1, reshape=LinearInputReshapeFn()),
                     )
                 ),
-                outputs=TensorCache(channels_dim=-1, reshape=LinearReshapeFn()),
+                outputs=TensorCache(channels_dim=-1, reshape=LinearInputReshapeFn()),
             )
         elif isinstance(module, Attention):
             return IOTensorsCache(
@@ -219,7 +259,10 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             assert len(args) == 0, f"Invalid args: {args}"
         else:
             hidden_states = args[0]
-        if isinstance(m, (FluxTransformerBlock, JointTransformerBlock)):
+        _dual_stream_blocks = (FluxTransformerBlock, JointTransformerBlock)
+        if QwenImageTransformerBlock is not None:
+            _dual_stream_blocks = _dual_stream_blocks + (QwenImageTransformerBlock,)
+        if isinstance(m, _dual_stream_blocks):
             if "encoder_hidden_states" in kwargs:
                 encoder_hidden_states = kwargs.pop("encoder_hidden_states")
             else:
@@ -249,7 +292,10 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             `dict[str | int, Any]`:
                 Dictionary for updating the next layer inputs.
         """
-        if isinstance(m, (FluxTransformerBlock, JointTransformerBlock)):
+        _dual_stream_blocks = (FluxTransformerBlock, JointTransformerBlock)
+        if QwenImageTransformerBlock is not None:
+            _dual_stream_blocks = _dual_stream_blocks + (QwenImageTransformerBlock,)
+        if isinstance(m, _dual_stream_blocks):
             assert isinstance(outputs, tuple) and len(outputs) == 2
             encoder_hidden_states, hidden_states = outputs
             return {0: hidden_states.detach().cpu(), 1: encoder_hidden_states.detach().cpu()}

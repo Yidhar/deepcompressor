@@ -14,7 +14,29 @@ from deepcompressor.data.utils import ScaleUtils
 from deepcompressor.utils.config.output import OutputConfig
 
 from .cache.config import LlmCacheConfig, LlmQuantCacheConfig
-from .eval.config import LlmEvalConfig
+# Lazy import: LlmEvalConfig pulls in lm_eval/cleanfid which are very slow on NFS
+_LlmEvalConfig = None
+def _get_llm_eval_config():
+    global _LlmEvalConfig
+    if _LlmEvalConfig is None:
+        from .eval.config import LlmEvalConfig as _cls
+        _LlmEvalConfig = _cls
+    return _LlmEvalConfig
+
+class _LazyEvalConfigMeta(type):
+    """Metaclass that forwards all attribute access to the real LlmEvalConfig."""
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, _get_llm_eval_config())
+    def __subclasscheck__(cls, subclass):
+        return issubclass(subclass, _get_llm_eval_config())
+    def __getattr__(cls, name):
+        return getattr(_get_llm_eval_config(), name)
+    def __call__(cls, *args, **kwargs):
+        return _get_llm_eval_config()(*args, **kwargs)
+
+class LlmEvalConfig(metaclass=_LazyEvalConfigMeta):
+    """Lazy proxy for the real LlmEvalConfig."""
+    pass
 from .model.config import LlmModelConfig
 from .quant.config import LlmQuantConfig
 

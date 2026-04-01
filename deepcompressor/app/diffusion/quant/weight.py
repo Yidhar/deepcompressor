@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from deepcompressor.calib.distributed import DistributedCalibContext
 from deepcompressor.data.cache import IOTensorsCache
 from deepcompressor.data.zero import ZeroPointDomain
 from deepcompressor.nn.patch.lowrank import LowRankBranch
@@ -154,6 +155,7 @@ def update_diffusion_block_weight_quantizer_state_dict(
     quantizer_state_dict: dict[str, dict[str, torch.Tensor | float | None]],
     layer_cache: dict[str, IOTensorsCache],
     layer_kwargs: dict[str, tp.Any],
+    dist_ctx: DistributedCalibContext | None = None,
 ):
     """Update the state dict of the weight quantizers for a block of a diffusion model.
 
@@ -168,6 +170,8 @@ def update_diffusion_block_weight_quantizer_state_dict(
             The cache of the layer.
         layer_kwargs (`dict[str, tp.Any]`):
             The keyword arguments for the layer.
+        dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+            Distributed calibration context for sample-parallel calibration.
     """
     logger = tools.logging.getLogger(f"{__name__}.WeightQuant")
     logger.debug("- Calibrating weights: block %s", layer.name)
@@ -200,6 +204,7 @@ def update_diffusion_block_weight_quantizer_state_dict(
                     eval_inputs=layer_cache[eval_name].inputs if layer_cache else None,
                     eval_module=eval_module,
                     eval_kwargs=eval_kwargs,
+                    dist_ctx=dist_ctx,
                 )
                 quantizer_state_dict[module_name] = quantizer.state_dict()
                 gc.collect()
@@ -299,6 +304,7 @@ def quantize_diffusion_weights(
     quantizer_state_dict: dict[str, dict[str, torch.Tensor | float | None]] | None = None,
     branch_state_dict: dict[str, dict[str, torch.Tensor]] | None = None,
     return_with_scale_state_dict: bool = False,
+    dist_ctx: DistributedCalibContext | None = None,
 ) -> tuple[
     dict[str, dict[str, torch.Tensor | float | None]],
     dict[str, dict[str, torch.Tensor]],
@@ -317,6 +323,8 @@ def quantize_diffusion_weights(
             The state dict of the low-rank branches.
         return_with_scale_state_dict (`bool`, *optional*, defaults to `False`):
             Whether to return the scale state dict.
+        dist_ctx (`DistributedCalibContext` or `None`, *optional*, defaults to `None`):
+            Distributed calibration context for sample-parallel calibration.
 
     Returns:
         `tuple[
@@ -400,6 +408,7 @@ def quantize_diffusion_weights(
                     quantizer_state_dict=quantizer_state_dict,
                     layer_cache=layer_cache,
                     layer_kwargs=layer_kwargs,
+                    dist_ctx=dist_ctx,
                 )
     scale_state_dict: dict[str, torch.Tensor | float | None] = {}
     if config.wgts.enabled_gptq:

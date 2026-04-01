@@ -14,7 +14,28 @@ from deepcompressor.data.utils import ScaleUtils
 from deepcompressor.utils.config.output import OutputConfig
 
 from .cache import DiffusionPtqCacheConfig, DiffusionQuantCacheConfig
-from .eval import DiffusionEvalConfig
+# Lazy import: DiffusionEvalConfig pulls in cleanfid/lpips which are very slow on NFS
+_DiffusionEvalConfig = None
+def _get_diffusion_eval_config():
+    global _DiffusionEvalConfig
+    if _DiffusionEvalConfig is None:
+        from .eval import DiffusionEvalConfig as _cls
+        _DiffusionEvalConfig = _cls
+    return _DiffusionEvalConfig
+
+class _LazyDiffEvalMeta(type):
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, _get_diffusion_eval_config())
+    def __subclasscheck__(cls, subclass):
+        return issubclass(subclass, _get_diffusion_eval_config())
+    def __getattr__(cls, name):
+        return getattr(_get_diffusion_eval_config(), name)
+    def __call__(cls, *args, **kwargs):
+        return _get_diffusion_eval_config()(*args, **kwargs)
+
+class DiffusionEvalConfig(metaclass=_LazyDiffEvalMeta):
+    """Lazy proxy for the real DiffusionEvalConfig."""
+    pass
 from .nn.struct import DiffusionModelStruct
 from .pipeline import DiffusionPipelineConfig
 from .quant import DiffusionQuantConfig
@@ -101,6 +122,7 @@ class DiffusionPtqRunConfig:
             model=self.pipeline.name,
             protocol=self.eval.protocol,
             data=self.quant.calib.data,
+            num_samples=self.quant.calib.num_samples,
         )
         if self.quant.calib.path:
             self.quant.calib.path = os.path.abspath(os.path.expanduser(self.quant.calib.path))
