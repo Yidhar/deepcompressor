@@ -73,6 +73,7 @@ find_latest_named_run() {
   local latest
   latest=$(
     find "${RUNS_ROOT}" -type d \( -path "*/${job_name}/run-*" -o -path "*/${job_name}.RUNNING/run-*" \)       | rg -v '/run-[^/]+\.ERROR$'       | while IFS= read -r candidate; do
+          [[ "$(basename "${candidate}")" == run-* ]] || continue
           stat -c '%Y %n' "${candidate}"
         done       | sort -nr       | head -n 1       | cut -d' ' -f2-
   )

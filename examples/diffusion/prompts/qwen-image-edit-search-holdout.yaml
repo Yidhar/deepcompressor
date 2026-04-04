@@ -1,18 +1,18 @@
 cat_crayon_sign:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/cat_sitting.jpg
+  image: ../assets/qwen-image-edit-search/cat_sitting.jpg
   prompt: "Make the cat float in the air and hold a sign that reads 'this is fun' written with a blue crayon."
 man_studio_trench:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/man.png
+  image: ../assets/qwen-image-edit-search/man.png
   prompt: "Put the person in a clean white studio wearing a dark trench coat, keeping the facial identity and camera angle consistent."
 neon_open_late:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/neon_sign.png
+  image: ../assets/qwen-image-edit-search/neon_sign.png
   prompt: "Change the text so the sign reads 'OPEN LATE'. Keep the neon lighting and perspective natural."
 neon_qwen_2511:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/neon_sign.png
+  image: ../assets/qwen-image-edit-search/neon_sign.png
   prompt: "Change the text so the sign reads 'Qwen Image Edit 2511'. Keep the neon lighting and perspective natural."
 pie_vintage_comic:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/pie.png
+  image: ../assets/qwen-image-edit-search/pie.png
   prompt: "Turn the style of the photo into a vintage comic book while keeping the pie composition recognizable."
 sofa_green_velvet:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/sofa.png
+  image: ../assets/qwen-image-edit-search/sofa.png
   prompt: "Convert the sofa into a dark green velvet sofa in a warm editorial living room, preserving the camera angle."

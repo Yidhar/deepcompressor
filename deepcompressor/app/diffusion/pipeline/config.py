@@ -63,11 +63,15 @@ class LoRAConfig:
             The weight name of the LoRA branch.
         alpha (`float`):
             The alpha value of the LoRA branch.
+        merge (`bool`):
+            Whether to fuse the LoRA delta into model weights directly instead of
+            registering a runtime low-rank branch.
     """
 
     path: str
     weight_name: str
     alpha: float = 1.0
+    merge: bool = False
 
 
 @configclass
@@ -227,7 +231,8 @@ class DiffusionPipelineConfig:
         assert isinstance(model, nn.Module)
         if self.lora is not None:
             logger = tools.logging.getLogger(__name__)
-            logger.info(f"Load LoRA branches from {self.lora.path}")
+            action = "Merge LoRA weights" if self.lora.merge else "Load LoRA branches"
+            logger.info(f"{action} from {self.lora.path}")
             lora_state_dict, alphas = pipeline.lora_state_dict(
                 self.lora.path, return_alphas=True, weight_name=self.lora.weight_name
             )
@@ -287,7 +292,16 @@ class DiffusionPipelineConfig:
                                     branch_hook = hook
                                 if isinstance(hook, ProcessHook) and isinstance(hook.processor, Quantizer):
                                     quant_hook = hook
-                            if branch_hook is not None:
+                            if self.lora.merge:
+                                logger.debug("- merge LoRA delta into module weight")
+                                if branch_hook is not None:
+                                    logger.debug("- absorb existing low-rank branch before removing hook")
+                                    delta = branch_hook.branch.get_effective_weight().to(device=device, dtype=torch.float64)
+                                    m.weight.data.add_(delta.mul(branch_hook.branch.alpha).to(device=device, dtype=dtype))
+                                    branch_hook.remove(m)
+                                delta = torch.matmul(b, a).mul_(self.lora.alpha)
+                                m.weight.data.add_(delta.to(device=device, dtype=dtype))
+                            elif branch_hook is not None:
                                 logger.debug("- fuse with existing LoRA branch")
                                 assert isinstance(branch_hook.branch, LowRankBranch)
                                 _a = branch_hook.branch.a.weight.data
