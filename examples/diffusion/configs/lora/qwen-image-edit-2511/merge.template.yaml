@@ -1,0 +1,9 @@
+# Overlay this on top of examples/diffusion/configs/model/qwen-image-edit-2511.yaml
+# to fuse a LoRA into bf16 weights before PTQ/export.
+pipeline:
+  lora:
+    path: /path/to/lora-or-hf-repo
+    weight_name: your_lora.safetensors
+    alpha: 1.0
+    merge: true
+skip_eval: true

@@ -133,6 +133,12 @@ VARIANT_SPECS = [
         'benchmark': 'quality-r96-nunchaku-50steps-qwen-image-edit-search-holdout-24-all24-gpu2',
     },
     {
+        'variant': 'quality-r96-b175',
+        'checkpoint': 'nunchaku_qwen_image_edit_2511_quality_r96_b175_int4.safetensors',
+        'export': 'qwen-image-edit-2511-search-quality-r96-b175-gptq-int4.safetensors',
+        'benchmark': 'quality-r96-b175-nunchaku-50steps-qwen-image-edit-search-holdout-24-all24-gpu0',
+    },
+    {
         'variant': 'quality-r96-i128',
         'checkpoint': 'nunchaku_qwen_image_edit_2511_quality_r96_i128_int4.safetensors',
         'export': 'qwen-image-edit-2511-search-quality-r96-i128-gptq-int4.safetensors',

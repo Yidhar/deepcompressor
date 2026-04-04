@@ -1,6 +1,6 @@
 neon_sign:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/neon_sign.png
+  image: ../assets/qwen-image-edit-search/neon_sign.png
   prompt: "Change the text so the sign reads 'Qwen Image Edit 2511'. Keep the neon lighting and perspective natural."
 man_portrait:
-  image: https://huggingface.co/datasets/nunchaku-tech/test-data/resolve/main/inputs/man.png
+  image: ../assets/qwen-image-edit-search/man.png
   prompt: "Put the person in a clean white studio wearing a dark trench coat, keeping the facial identity and camera angle consistent."
