@@ -452,6 +452,11 @@ def convert_to_nunchaku_qwenimage_transformer_block_state_dict(
         txt_down_proj_local_name = "txt_mlp.net.2"
         assert f"{block_name}.{txt_down_proj_local_name}.weight" in state_dict
 
+    # Emit per-head attention projections (to_q/to_k/to_v, add_q_proj/add_k_proj/
+    # add_v_proj) rather than the legacy fused to_qkv / add_qkv_proj. Per-linear
+    # export preserves per-head smooth/LoRA calibration (each linear already has
+    # its own `.scale.*` in scale_dict) and matches ComfyUI's native Qwen-Image
+    # Attention topology without any runtime model patching.
     return convert_to_nunchaku_transformer_block_state_dict(
         state_dict=state_dict,
         scale_dict=scale_dict,
@@ -459,12 +464,17 @@ def convert_to_nunchaku_qwenimage_transformer_block_state_dict(
         branch_dict=branch_dict,
         block_name=block_name,
         local_name_map={
-            # Modulation layers (W4A16) - keep original names for Nunchaku compatibility
+            # Modulation layers (W4A16)
             "img_mod.1": "img_mod.1",
             "txt_mod.1": "txt_mod.1",
-            # Attention QKV projections - merged to single layer
-            "attn.to_qkv": ["attn.to_q", "attn.to_k", "attn.to_v"],
-            "attn.add_qkv_proj": ["attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj"],
+            # Attention image-stream projections (split QKV)
+            "attn.to_q": "attn.to_q",
+            "attn.to_k": "attn.to_k",
+            "attn.to_v": "attn.to_v",
+            # Attention text-stream projections (split QKV)
+            "attn.add_q_proj": "attn.add_q_proj",
+            "attn.add_k_proj": "attn.add_k_proj",
+            "attn.add_v_proj": "attn.add_v_proj",
             # Attention normalization layers (non-quantized, direct copy)
             "attn.norm_q": "attn.norm_q",
             "attn.norm_k": "attn.norm_k",
@@ -473,16 +483,23 @@ def convert_to_nunchaku_qwenimage_transformer_block_state_dict(
             # Attention output projections
             "attn.to_out.0": "attn.to_out.0",
             "attn.to_add_out": "attn.to_add_out",
-            # Image MLP - keep original structure
+            # Image MLP
             "img_mlp.net.0.proj": "img_mlp.net.0.proj",
             "img_mlp.net.2": img_down_proj_local_name,
-            # Text MLP - keep original structure
+            # Text MLP
             "txt_mlp.net.0.proj": "txt_mlp.net.0.proj",
             "txt_mlp.net.2": txt_down_proj_local_name,
         },
         smooth_name_map={
-            "attn.to_qkv": "attn.to_q",
-            "attn.add_qkv_proj": "attn.add_k_proj",
+            # Each split QKV linear carries its own smoothing (the calibrated
+            # input is the attention norm output, shared across Q/K/V, so the
+            # smooth name all collapse back to the canonical per-stream source).
+            "attn.to_q": "attn.to_q",
+            "attn.to_k": "attn.to_k",
+            "attn.to_v": "attn.to_v",
+            "attn.add_q_proj": "attn.add_q_proj",
+            "attn.add_k_proj": "attn.add_k_proj",
+            "attn.add_v_proj": "attn.add_v_proj",
             "attn.to_out.0": "attn.to_out.0",
             "attn.to_add_out": "attn.to_out.0",
             "img_mlp.net.0.proj": "img_mlp.net.0.proj",
@@ -493,8 +510,12 @@ def convert_to_nunchaku_qwenimage_transformer_block_state_dict(
             "txt_mod.1": "txt_mod.1",
         },
         branch_name_map={
-            "attn.to_qkv": "attn.to_q",
-            "attn.add_qkv_proj": "attn.add_k_proj",
+            "attn.to_q": "attn.to_q",
+            "attn.to_k": "attn.to_k",
+            "attn.to_v": "attn.to_v",
+            "attn.add_q_proj": "attn.add_q_proj",
+            "attn.add_k_proj": "attn.add_k_proj",
+            "attn.add_v_proj": "attn.add_v_proj",
             "attn.to_out.0": "attn.to_out.0",
             "attn.to_add_out": "attn.to_add_out",
             "img_mlp.net.0.proj": "img_mlp.net.0.proj",
@@ -506,11 +527,16 @@ def convert_to_nunchaku_qwenimage_transformer_block_state_dict(
             # Modulation layers use adanorm_mod (W4A16 with 6 splits)
             "img_mod.1": "adanorm_mod",
             "txt_mod.1": "adanorm_mod",
-            # All other quantized layers use linear (W4A4)
-            "attn.to_qkv": "linear",
-            "attn.add_qkv_proj": "linear",
+            # Attention QKV + output linears (W4A4)
+            "attn.to_q": "linear",
+            "attn.to_k": "linear",
+            "attn.to_v": "linear",
+            "attn.add_q_proj": "linear",
+            "attn.add_k_proj": "linear",
+            "attn.add_v_proj": "linear",
             "attn.to_out.0": "linear",
             "attn.to_add_out": "linear",
+            # MLP linears (W4A4)
             "img_mlp.net.0.proj": "linear",
             "img_mlp.net.2": "linear",
             "txt_mlp.net.0.proj": "linear",
