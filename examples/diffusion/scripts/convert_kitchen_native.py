@@ -238,6 +238,28 @@ def convert(raw_nunchaku: Path, base_comfy: Path, output: Path,
                     qweight=qw, wscales=ws, wzeros=wz,
                     n_orig=n_orig, group_size=awq_group_size,
                 )
+                # nunchaku stores modulation rows as [dim, 6] interleaved
+                # (shift1, scale1, gate1, shift2, scale2, gate2 packed per
+                # channel); ComfyUI's QwenImageTransformerBlock chunks the
+                # output as [6, dim], so transpose the leading 2 axes for
+                # weight rows and bias. Mirrors `_reorder_modulation` in
+                # nunchaku/tools/convert_nunchaku_qwen_to_comfy.py.
+                assert n_orig % 6 == 0, f"modulation N={n_orig} not divisible by 6"
+                dim = n_orig // 6
+                params["weight"] = (
+                    params["weight"].view(dim, 6, -1).transpose(0, 1)
+                    .reshape(n_orig, -1).contiguous()
+                )
+                params["weight_scale"] = (
+                    params["weight_scale"].view(-1, dim, 6).transpose(1, 2)
+                    .reshape(-1, n_orig).contiguous()
+                )
+                params["weight_zero"] = (
+                    params["weight_zero"].view(-1, dim, 6).transpose(1, 2)
+                    .reshape(-1, n_orig).contiguous()
+                )
+                if bias is not None:
+                    bias = bias.view(dim, 6).transpose(0, 1).reshape(n_orig).contiguous()
                 cq = out.get(f"{prefix}.comfy_quant")
                 _drop_prefix_tensors(out, prefix)
                 _write_awq(out, prefix=prefix, params=params, bias=bias,
