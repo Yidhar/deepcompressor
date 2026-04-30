@@ -5,7 +5,7 @@ This is the production conversion entry point — combines two transformations:
 
   1. SVDQuant W4A4 (attention + MLP):
      layout-only repack from nunchaku tile-packed (qweight/wscales) into
-     kitchen row-major (weight/weight_scale), with per-head QKV split
+     kitchen tile-packed (weight/weight_scale), with per-head QKV split
      (attn.to_qkv -> attn.to_q / .to_k / .to_v, similarly for add_qkv_proj).
      No dequantize / requantize — bit-exact int4 values preserved.
 
@@ -43,6 +43,11 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from deepcompressor.backend.kitchen.tilepack import (
+    KITCHEN_TILEPACK_LAYOUT_NAME,
+    to_kitchen_tile_packed_params,
+)
+
 # Auto-discover nunchaku helpers if the user has the repo cloned alongside.
 for _candidate in (
     os.environ.get("NUNCHAKU_REPO_DIR"),
@@ -54,14 +59,13 @@ for _candidate in (
             sys.path.insert(0, _candidate)
         break
 
+from tools.kitchen_native.awq_modulation import (  # type: ignore  # noqa: E402
+    convert_modulation_awq,
+)
 from tools.kitchen_native.interop import (  # type: ignore  # noqa: E402
     convert_nunchaku_svdquant_params,
     split_natural_svdquant_params,
 )
-from tools.kitchen_native.awq_modulation import (  # type: ignore  # noqa: E402
-    convert_modulation_awq,
-)
-
 
 _W4A4_RAW_SUFFIXES = ("qweight", "wscales", "smooth_factor", "proj_down", "proj_up")
 _AWQ_RAW_SUFFIXES = ("qweight", "wscales", "wzeros")
@@ -71,7 +75,6 @@ _QKV_SPLIT_TARGETS = {
 }
 _AWQ_MODULATION_SUFFIXES = (".img_mod.1", ".txt_mod.1")
 _ACT_UNSIGNED_SUFFIXES = (".img_mlp.net.2", ".txt_mlp.net.2", ".ff.net.2")
-
 
 # --- helpers --------------------------------------------------------------
 
@@ -134,15 +137,23 @@ def _write_svdquant(
     params: dict[str, torch.Tensor],
     comfy_quant: torch.Tensor | None,
 ) -> None:
-    out[f"{prefix}.weight"] = params["weight"].cpu()
-    out[f"{prefix}.weight_scale"] = params["weight_scale"].cpu()
-    out[f"{prefix}.smooth_factor"] = params["smooth_factor"].cpu()
-    out[f"{prefix}.proj_down"] = params["proj_down"].cpu()
-    out[f"{prefix}.proj_up"] = params["proj_up"].cpu()
-    if "bias" in params:
-        out[f"{prefix}.bias"] = params["bias"].cpu()
+    """Write an SVDQuant W4A4 layer to the output state dict.
+
+    `params` is in natural (N, K//2) layout; this re-packs into the kitchen
+    tile-packed layout (BLOCK_N=128, kInterleave=4, WARP_K=64) consumed by
+    the CUDA kernel in comfy_kitchen/backends/cuda/ops/svdquant_w4a4_native/.
+    """
+    tp = to_kitchen_tile_packed_params(params)
+    out[f"{prefix}.weight"] = tp["weight"].cpu()
+    out[f"{prefix}.weight_scale"] = tp["weight_scale"].cpu()
+    out[f"{prefix}.smooth_factor"] = tp["smooth_factor"].cpu()
+    out[f"{prefix}.proj_down"] = tp["proj_down"].cpu()
+    out[f"{prefix}.proj_up"] = tp["proj_up"].cpu()
+    if "bias" in tp:
+        out[f"{prefix}.bias"] = tp["bias"].cpu()
     out[f"{prefix}.comfy_quant"] = _patch_comfy_quant(
         comfy_quant, fmt="svdquant_w4a4",
+        layout=KITCHEN_TILEPACK_LAYOUT_NAME,
         act_unsigned=True if _is_act_unsigned(prefix) else None,
     )
 
@@ -279,7 +290,7 @@ def convert(raw_nunchaku: Path, base_comfy: Path, output: Path,
     new_meta["comfy_converter"] = f"{existing} + {suffix}" if existing else suffix
     new_meta["source_nunchaku"] = raw_nunchaku.name
     new_meta["source_base_comfy"] = base_comfy.name
-    new_meta["svdquant_storage_layout"] = "kitchen-native-natural-v1"
+    new_meta["svdquant_storage_layout"] = KITCHEN_TILEPACK_LAYOUT_NAME
     new_meta["awq_modulation_layout"] = (
         "kitchen-native-uint4-row-major" if awq_modulation else "dequant-bf16"
     )
